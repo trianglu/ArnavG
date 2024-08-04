@@ -1,10 +1,9 @@
 - 👋 Hi, I’m @trianglu
 - 👀 I’m interested in creating online websites
-- 🌱 I’m currently learning CSS
+- 🌱 I’m currently learning full stack web development
 - 💞️ I’m looking to collaborate on anything
 - 📫 How to reach me 
 -   email: arnavg@gmail.com
--   insta: the_silenty_chill
 -   twitter: @ArnavGang
 
 <!---
