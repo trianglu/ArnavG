@@ -4,7 +4,6 @@
 - 💞️ I’m looking to collaborate on anything
 - 📫 How to reach me 
 -   email: arnavg@gmail.com
--   twitter: @ArnavGang
 
 <!---
 trianglu/trianglu is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
