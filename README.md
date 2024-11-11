@@ -1,4 +1,4 @@
-- 👋 Hi, I’m @trianglu
+- 👋 Hi, I’m Arnav Gangiredla
 - 👀 I’m interested in creating online websites
 - 🌱 I’m currently learning full stack web development
 - 💞️ I’m looking to collaborate on anything
