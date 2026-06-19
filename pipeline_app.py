@@ -43,66 +43,103 @@ def fuzzy_match(row1, row2):
     return name_score >= 90 and addr_score >= 90
 
 # ------------------ PIPELINE ------------------
+
 def run_pipeline(df):
     # Remove first column
-    df = df.iloc[:, 1:]
+    df = df.iloc[:, 1:].reset_index(drop=True)
 
     # Normalize
-    df["norm_name"] = df["Name"].apply(normalize)
-    df["norm_address"] = df["Address"].apply(normalize)
+    df["norm_name"] = df["Name"].fillna("").str.lower().str.replace(r'[^a-z0-9 ]',' ', regex=True)
+    df["norm_address"] = df["Address"].fillna("").str.lower().str.replace(r'[^a-z0-9 ]',' ', regex=True)
+
+    # ---------- BLOCKING ----------
+    df["block"] = (
+        df["norm_name"].str[:3] + "_" +
+        df["norm_address"].str[:5]
+    )
 
     df["group_id"] = None
+    df["match_score"] = None
+
     group_counter = 1
 
-    used = set()
+    # ---------- MATCHING ----------
+    for block, subset in df.groupby("block"):
+        idxs = subset.index.tolist()
 
-    progress = st.progress(0)
+        for i_idx in range(len(idxs)):
+            i = idxs[i_idx]
 
-    for i in range(len(df)):
-        if i in used:
-            continue
-    
-        current_group = [i]
-        used.add(i)
-    
-        for j in range(i + 1, len(df)):
-    
-            # ✅ Skip already grouped rows FIRST (faster)
-            if j in used:
+            if pd.notna(df.loc[i, "group_id"]):
                 continue
-    
-            # ✅ Quick pre-filter (GOOD)
-            if df.iloc[i]["norm_name"][:5] != df.iloc[j]["norm_name"][:5]:
-                continue
-    
-            # ✅ Fuzzy match
-            if fuzzy_match(df.iloc[i], df.iloc[j]):
-                current_group.append(j)
-                used.add(j)
-    
-        # ✅ Assign group_id if duplicates found
-        if len(current_group) > 1:
-            for idx in current_group:
-                df.loc[idx, "group_id"] = group_counter
-            group_counter += 1
-    
-    # ✅ Compute dup_count AFTER grouping
+
+            group = [i]
+
+            for j_idx in range(i_idx + 1, len(idxs)):
+                j = idxs[j_idx]
+
+                if pd.notna(df.loc[j, "group_id"]):
+                    continue
+
+                # Fuzzy scores
+                name_score = fuzz.token_sort_ratio(
+                    df.loc[i, "norm_name"],
+                    df.loc[j, "norm_name"]
+                )
+
+                addr_score = fuzz.token_sort_ratio(
+                    df.loc[i, "norm_address"],
+                    df.loc[j, "norm_address"]
+                )
+
+                final_score = 0.6 * name_score + 0.4 * addr_score
+
+                # Decision thresholds
+                if final_score >= 92:
+                    group.append(j)
+                    df.loc[j, "match_score"] = final_score
+
+            if len(group) > 1:
+                for idx in group:
+                    df.loc[idx, "group_id"] = group_counter
+                    if pd.isna(df.loc[idx, "match_score"]):
+                        df.loc[idx, "match_score"] = 100
+
+                group_counter += 1
+
+    # ---------- DUP COUNT ----------
     df["dup_count"] = df["group_id"].map(df["group_id"].value_counts())
-    
-    # Actions
-    def assign(group):
-        if pd.isna(group.name):
-            return ["UNIQUE"] * len(group)
-    
-        idxs = list(group.index)
-        return ["KEEP (Master)"] + [f"MERGE into {idxs[0]}"] * (len(group) - 1)
 
-    df["Action"] = df.groupby("group_id", dropna=False, group_keys=False).apply(
-        lambda g: pd.Series(assign(g), index=g.index)
-    ).reset_index(level=0, drop=True)
+    # ---------- MASTER SELECTION ----------
+    def pick_master(group):
+        # Prefer non-Prospect
+        if "Type" in group.columns:
+            group = group.sort_values(by="Type", ascending=False)
 
-    # Sorting
-    dups = df[df["group_id"].notna()].sort_values(["dup_count"], ascending=False)
+        # Prefer longest name (more complete)
+        return group.iloc[group["Name"].str.len().idxmax()]
+
+    actions = []
+
+    for gid, group in df.groupby("group_id", dropna=False):
+        if pd.isna(gid):
+            for idx in group.index:
+                actions.append((idx, "UNIQUE"))
+        else:
+            master_idx = group["Name"].str.len().idxmax()
+
+            for idx in group.index:
+                if idx == master_idx:
+                    actions.append((idx, "KEEP (Master)"))
+                else:
+                    actions.append((idx, f"MERGE into {master_idx}"))
+
+    df["Action"] = pd.Series(dict(actions))
+
+    # ---------- SORT ----------
+    dups = df[df["group_id"].notna()].sort_values(
+        ["dup_count", "group_id"], ascending=[False, True]
+    )
     singles = df[df["group_id"].isna()]
 
     return pd.concat([dups, singles])
