@@ -56,6 +56,8 @@ def run_pipeline(df):
 
     used = set()
 
+    progress = st.progress(0)
+
     for i in range(len(df)):
         if i in used:
             continue
@@ -64,6 +66,10 @@ def run_pipeline(df):
         used.add(i)
 
         for j in range(i + 1, len(df)):
+            # quick pre-filter
+                if df.iloc[i]["norm_name"][:5] != df.iloc[j]["norm_name"][:5]:
+                    continue
+            
             if j in used:
                 continue
 
