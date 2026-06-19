@@ -220,8 +220,19 @@ if uploaded_file:
 
         st.success("✅ Pipeline Complete!")
 
-        st.download_button(
-            "⬇ Download Output",
-            excel_file.getvalue(),
-            file_name="pipeline_output.xlsx"
-        )
+    # Detect state name
+    if "State" in result.columns:
+        state_name = result["State"].dropna().mode()[0]  # most frequent state
+    else:
+        state_name = "output"
+    
+    # Clean state name (safe filename)
+    state_name_clean = str(state_name).strip().replace(" ", "_")
+    
+    file_name = f"{state_name_clean}_final_processed.xlsx"
+    
+    st.download_button(
+        "⬇ Download Output",
+        excel_file.getvalue(),
+        file_name=file_name
+    )
