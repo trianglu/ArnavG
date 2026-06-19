@@ -67,8 +67,8 @@ def run_pipeline(df):
 
         for j in range(i + 1, len(df)):
             # quick pre-filter
-                if df.iloc[i]["norm_name"][:5] != df.iloc[j]["norm_name"][:5]:
-                    continue
+            if df.iloc[i]["norm_name"][:5] != df.iloc[j]["norm_name"][:5]:
+                continue
             
             if j in used:
                 continue
