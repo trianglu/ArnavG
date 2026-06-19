@@ -80,13 +80,13 @@ def run_pipeline(df):
 
     # Actions
     def assign(group):
-        if pd.isna(group["group_id"].iloc[0]):
+        if pd.isna(group.name):
             return ["UNIQUE"] * len(group)
-
+    
         idxs = list(group.index)
         return ["KEEP (Master)"] + [f"MERGE into {idxs[0]}"] * (len(group) - 1)
 
-    df["Action"] = df.groupby("group_id", dropna=False).apply(
+    df["Action"] = df.groupby("group_id", dropna=False, group_keys=False).apply(
         lambda g: pd.Series(assign(g), index=g.index)
     ).reset_index(level=0, drop=True)
 
