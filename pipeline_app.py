@@ -61,29 +61,34 @@ def run_pipeline(df):
     for i in range(len(df)):
         if i in used:
             continue
-
+    
         current_group = [i]
         used.add(i)
-
+    
         for j in range(i + 1, len(df)):
-            # quick pre-filter
-            if df.iloc[i]["norm_name"][:5] != df.iloc[j]["norm_name"][:5]:
-                continue
-            
+    
+            # ✅ Skip already grouped rows FIRST (faster)
             if j in used:
                 continue
-
+    
+            # ✅ Quick pre-filter (GOOD)
+            if df.iloc[i]["norm_name"][:5] != df.iloc[j]["norm_name"][:5]:
+                continue
+    
+            # ✅ Fuzzy match
             if fuzzy_match(df.iloc[i], df.iloc[j]):
                 current_group.append(j)
                 used.add(j)
-
+    
+        # ✅ Assign group_id if duplicates found
         if len(current_group) > 1:
             for idx in current_group:
                 df.loc[idx, "group_id"] = group_counter
             group_counter += 1
-
+    
+    # ✅ Compute dup_count AFTER grouping
     df["dup_count"] = df["group_id"].map(df["group_id"].value_counts())
-
+    
     # Actions
     def assign(group):
         if pd.isna(group.name):
