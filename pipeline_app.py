@@ -43,14 +43,31 @@ def fuzzy_match(row1, row2):
     return name_score >= 90 and addr_score >= 90
 
 # ------------------ PIPELINE ------------------
+# Normalize column names
+df_raw.columns = [str(col).strip() for col in df_raw.columns]
+
+# Try to auto-detect key columns
+def find_column(possible_names):
+    for col in df_raw.columns:
+        if any(name.lower() in col.lower() for name in possible_names):
+            return col
+    return None
+
+name_col = find_column(["name"])
+address_col = find_column(["address"])
+state_col = find_column(["state"])
 
 def run_pipeline(df):
     # Remove first column
     df = df.iloc[:, 1:].reset_index(drop=True)
 
     # Normalize
-    df["norm_name"] = df["Name"].fillna("").str.lower().str.replace(r'[^a-z0-9 ]',' ', regex=True)
-    df["norm_address"] = df["Address"].fillna("").str.lower().str.replace(r'[^a-z0-9 ]',' ', regex=True)
+    if not name_col or not address_col:
+        st.error("❌ Could not detect Name or Address columns. Please check file format.")
+        st.stop()
+    
+    df["norm_name"] = df[name_col].fillna("").astype(str).str.lower()
+    df["norm_address"] = df[address_col].fillna("").astype(str).str.lower()
 
     # ---------- BLOCKING ----------
     df["block"] = (
@@ -207,7 +224,18 @@ def build_file(df):
 if uploaded_file:
     st.success("✅ File uploaded")
 
-    df_raw = pd.read_excel(uploaded_file, skiprows=4)
+   def safe_read_excel(file):
+       try:
+           df = pd.read_excel(file, skiprows=4, engine="openpyxl")
+       except Exception:
+           file.seek(0)
+           df = pd.read_excel(file, header=None, engine="openpyxl")
+       
+       # force columns to strings
+       df.columns = df.columns.astype(str)
+       return df
+   
+    df_raw = safe_read_excel(uploaded_file)
 
     st.write("Preview:")
     st.dataframe(df_raw.head())
