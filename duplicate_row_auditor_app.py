@@ -2,11 +2,12 @@ import streamlit as st
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import PatternFill
 import io
+import pandas as pd
 
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 
 st.title("📊 Duplicate Row Auditor")
-st.write("Upload up to 50 Excel files. All highlighted rows (any fill color) will be treated as duplicate groups.")
+st.write("Upload up to 50 Excel files. Highlighted rows (any fill color) are treated as duplicate groups.")
 
 uploaded_files = st.file_uploader(
     "Upload Excel files",
@@ -14,24 +15,27 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+# --- Normalize column names ---
+def normalize(col):
+    if not col:
+        return ""
+    return str(col).strip().lower().replace(" ", "").replace("_", "")
+
+# --- Detect highlighted rows ---
 def is_highlighted(row):
-    # ANY filled cell → counts as highlighted
     return any(cell.fill and cell.fill.fill_type for cell in row)
 
+# --- SAFE fill copy (fixes crash) ---
 def safe_copy_fill(cell):
-    """
-    Safely recreate a fill (avoids StyleProxy crash)
-    """
     try:
         if not cell.fill or not cell.fill.fill_type:
             return None
 
-        # Handle RGB colors safely
         start = cell.fill.start_color
         end = cell.fill.end_color
 
-        start_color = start.rgb if start.rgb else None
-        end_color = end.rgb if end.rgb else None
+        start_color = start.rgb if start and start.rgb else None
+        end_color = end.rgb if end and end.rgb else None
 
         return PatternFill(
             start_color=start_color,
@@ -66,18 +70,22 @@ if uploaded_files:
                 if not rows:
                     continue
 
-                headers = [cell.value for cell in rows[0]]
+                headers_raw = [cell.value for cell in rows[0]]
+                headers = headers_raw
 
-                if "AccountGroup" not in headers:
+                normalized_headers = [normalize(h) for h in headers_raw]
+
+                # ✅ FIXED AccountGroup detection
+                if "accountgroup" not in normalized_headers:
                     st.warning(f"⚠️ {file.name} skipped (missing AccountGroup column)")
                     continue
 
-                acc_idx = headers.index("AccountGroup")
+                acc_idx = normalized_headers.index("accountgroup")
 
                 groups = []
                 current_group = []
 
-                # --- Step 1: Identify highlighted groups ---
+                # --- Identify highlighted groups ---
                 for row in rows[1:]:
 
                     if is_highlighted(row):
@@ -93,9 +101,8 @@ if uploaded_files:
                 total_groups = len(groups)
                 flagged_groups = 0
 
-                # --- Step 2: Apply Sold To rule ---
+                # --- Apply Sold To rule ---
                 for group in groups:
-
                     sold_to_count = 0
 
                     for row in group:
@@ -109,26 +116,59 @@ if uploaded_files:
 
                 summary.append((file.name, total_groups, flagged_groups))
 
-            # --- Step 3: Build output file ---
+            # ✅ GROUPED PREVIEW PANEL
+            if output_rows:
+                st.subheader("🔍 Preview of Flagged Duplicate Groups")
+
+                group_counter = {}
+
+                for file_name, group in output_rows:
+
+                    if file_name not in group_counter:
+                        group_counter[file_name] = 1
+                    else:
+                        group_counter[file_name] += 1
+
+                    group_num = group_counter[file_name]
+
+                    with st.expander(f"📁 {file_name} — Group {group_num}", expanded=False):
+
+                        group_data = []
+                        for row in group:
+                            group_data.append([cell.value for cell in row])
+
+                        group_df = pd.DataFrame(group_data, columns=headers)
+                        st.dataframe(group_df, use_container_width=True)
+
+                        # ✅ Sold To count display
+                        sold_to_count = sum(
+                            1 for r in group
+                            if r[acc_idx].value and str(r[acc_idx].value).strip().lower() == "sold to"
+                        )
+
+                        st.markdown(f"**✅ Sold To Count: {sold_to_count}**")
+
+            else:
+                st.info("No duplicate groups found with multiple 'Sold To' rows.")
+
+            # ✅ EXPORT OUTPUT
             if output_rows:
 
                 out_wb = Workbook()
                 out_ws = out_wb.active
                 out_ws.title = "Flagged Groups"
 
-                # Write headers
                 out_ws.append(["Source File"] + headers)
 
                 for file_name, group in output_rows:
 
-                    # separator row
                     out_ws.append([f"--- {file_name} ---"] + [""] * len(headers))
 
                     for row in group:
                         values = [cell.value for cell in row]
                         out_ws.append([file_name] + values)
 
-                        # ✅ SAFE highlight copy (NO CRASH)
+                        # ✅ SAFE highlight copy
                         for col_idx, cell in enumerate(row):
                             out_cell = out_ws.cell(
                                 row=out_ws.max_row,
@@ -155,10 +195,7 @@ if uploaded_files:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-            else:
-                st.info("No duplicate groups found with multiple 'Sold To' rows.")
-
-            # --- Summary ---
+            # ✅ SUMMARY
             st.subheader("📋 Summary")
             for name, total, flagged in summary:
                 st.write(f"**{name}** → Groups Reviewed: {total}, Flagged: {flagged}")
