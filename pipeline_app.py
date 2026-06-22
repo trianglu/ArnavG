@@ -144,14 +144,15 @@ def build_file(df):
     output = BytesIO()
     wb = Workbook()
 
-    ws = wb.active
-    ws.title = "Main"
+    # -------- MAIN SHEET --------
+    ws_main = wb.active
+    ws_main.title = "Main"
 
-    ws.append(list(df.columns))
+    ws_main.append(list(df.columns))
     for row in df.itertuples(index=False):
-        ws.append(list(row))
+        ws_main.append(list(row))
 
-    # Colors
+    # -------- COLOR HIGHLIGHTING --------
     colors = ["FFFF99","99FF99","99CCFF","FF9999","CC99FF"]
     color_map = {}
     idx = 0
@@ -166,13 +167,37 @@ def build_file(df):
                                end_color=color_map[row.group_id],
                                fill_type="solid")
             for col in range(1, len(df.columns)+1):
-                ws.cell(row=i, column=col).fill = fill
+                ws_main.cell(row=i, column=col).fill = fill
 
-    # Summary sheet
+    # -------- DUPLICATE GROUPS SHEET --------
+    ws_groups = wb.create_sheet("Duplicate Groups")
+
+    for gid, group in df[df["group_id"].notna()].groupby("group_id"):
+        ws_groups.append([f"==== GROUP {int(gid)} ===="])
+        ws_groups.append(list(df.columns))
+
+        for r in group.itertuples(index=False):
+            ws_groups.append(list(r))
+
+        ws_groups.append([])
+
+    # -------- MERGE INSTRUCTIONS SHEET --------
+    ws_merge = wb.create_sheet("Merge Instructions")
+    ws_merge.append(["group_id", "Action"])
+
+    for r in df[df["Action"].str.contains("MERGE", na=False)].itertuples(index=False):
+        ws_merge.append([r.group_id, r.Action])
+
+    # -------- SUMMARY DASHBOARD --------
     ws_summary = wb.create_sheet("Summary Dashboard")
-    ws_summary.append(["Group ID","Count"])
+    ws_summary.append(["Group ID", "Duplicate Count"])
 
-    summary = df[df["group_id"].notna()].groupby("group_id").size()
+    summary = (
+        df[df["group_id"].notna()]
+        .groupby("group_id")
+        .size()
+        .sort_values(ascending=False)
+    )
 
     for gid, count in summary.items():
         ws_summary.append([gid, count])
