@@ -221,8 +221,59 @@ def build_file(df):
     return output
 
 # ------------------ RUN ------------------
+uploaded_file = st.file_uploader("📂 Upload Excel file", type=["xlsx"])
+
 if uploaded_file:
+
     st.success("✅ File uploaded")
+
+    # ✅ Step 1: Read file FIRST
+    df_raw = safe_read_excel(uploaded_file)
+
+    # ✅ Step 2: THEN clean columns
+    df_raw.columns = [str(col).strip() for col in df_raw.columns]
+
+    # ✅ Step 3: Detect columns
+    def find_column(possible_names):
+        for col in df_raw.columns:
+            if any(name.lower() in col.lower() for name in possible_names):
+                return col
+        return None
+
+    name_col = find_column(["name"])
+    address_col = find_column(["address"])
+    state_col = find_column(["state"])
+
+    if not name_col or not address_col:
+        st.error("❌ Could not detect Name or Address columns.")
+        st.stop()
+
+    st.success(f"✅ Using columns: {name_col}, {address_col}")
+
+    # ✅ Optional preview
+    st.dataframe(df_raw.head())
+
+    if st.button("🚀 Run Pipeline"):
+        with st.spinner("Processing..."):
+            result = run_pipeline(df_raw)
+
+            excel_file = build_file(result)
+
+        st.success("✅ Pipeline Complete!")
+
+        # ✅ Dynamic file name
+        if state_col:
+            state_name = result[state_col].dropna().astype(str).str.title().mode()[0]
+        else:
+            state_name = "output"
+
+        file_name = f"{state_name.replace(' ','_')}_final_processed.xlsx"
+
+        st.download_button(
+            "⬇ Download Output",
+            excel_file.getvalue(),
+            file_name=file_name
+        )
 
 def safe_read_excel(file):
    try:
