@@ -1,12 +1,11 @@
-
 import streamlit as st
-import pandas as pd
+from openpyxl import load_workbook, Workbook
 import io
 
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 
 st.title("📊 Duplicate Row Auditor")
-st.write("Upload up to 50 Excel files and extract duplicate groups where multiple rows are marked 'Sold To'.")
+st.write("Upload up to 50 Excel files. All highlighted rows (any fill color) will be treated as duplicate groups.")
 
 uploaded_files = st.file_uploader(
     "Upload Excel files",
@@ -14,55 +13,116 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+def is_highlighted(row):
+    # ANY filled cell → counts as highlighted
+    return any(cell.fill and cell.fill.fill_type for cell in row)
+
 if uploaded_files:
     if len(uploaded_files) > 50:
         st.error("⚠️ Please upload 50 files or fewer.")
     else:
         if st.button("Run Audit"):
-            output_groups = []
+
+            output_rows = []
             summary = []
+            headers_written = False
+            headers = None
 
             for file in uploaded_files:
-                df = pd.read_excel(file, engine="openpyxl")
 
-                if "group_id" not in df.columns or "AccountGroup" not in df.columns:
-                    st.warning(f"Skipping {file.name} (missing required columns)")
+                wb = load_workbook(file, data_only=True)
+                ws = wb.active
+
+                rows = list(ws.iter_rows())
+
+                headers = [cell.value for cell in rows[0]]
+
+                if "AccountGroup" not in headers:
+                    st.warning(f"⚠️ {file.name} skipped (missing AccountGroup column)")
                     continue
 
-                grouped = df.groupby("group_id")
-                total_groups = 0
+                acc_idx = headers.index("AccountGroup")
+
+                groups = []
+                current_group = []
+
+                # --- Step 1: Identify highlighted groups ---
+                for row in rows[1:]:
+
+                    if is_highlighted(row):
+                        current_group.append(row)
+                    else:
+                        if current_group:
+                            groups.append(current_group)
+                            current_group = []
+
+                if current_group:
+                    groups.append(current_group)
+
+                total_groups = len(groups)
                 flagged_groups = 0
 
-                for gid, g in grouped:
-                    if str(gid).upper() == "UNIQUE":
-                        continue
+                # --- Step 2: Apply Sold To rule ---
+                for group in groups:
 
-                    total_groups += 1
-                    sold_to_count = (g["AccountGroup"].astype(str).str.lower() == "sold to").sum()
+                    sold_to_count = 0
+
+                    for row in group:
+                        value = str(row[acc_idx].value).strip().lower()
+                        if value == "sold to":
+                            sold_to_count += 1
 
                     if sold_to_count > 1:
                         flagged_groups += 1
-                        output_groups.append(g)
+                        output_rows.append((file.name, group))
 
                 summary.append((file.name, total_groups, flagged_groups))
 
-            if output_groups:
-                result = pd.concat(output_groups, ignore_index=True)
-                output = io.BytesIO()
-                result.to_excel(output, index=False, engine="openpyxl")
-                output.seek(0)
+            # --- Step 3: Build output file ---
+            if output_rows:
+
+                out_wb = Workbook()
+                out_ws = out_wb.active
+
+                out_ws.title = "Flagged Groups"
+
+                # Write headers once
+                out_ws.append(["Source File"] + headers)
+
+                for file_name, group in output_rows:
+
+                    # Optional separator row for readability
+                    out_ws.append([f"--- {file_name} ---"] + [""] * (len(headers)))
+
+                    for row in group:
+                        values = [cell.value for cell in row]
+                        out_ws.append([file_name] + values)
+
+                        # Preserve highlights
+                        for col_idx, cell in enumerate(row):
+                            out_cell = out_ws.cell(
+                                row=out_ws.max_row,
+                                column=col_idx + 2
+                            )
+                            out_cell.fill = cell.fill
+
+                buffer = io.BytesIO()
+                out_wb.save(buffer)
+                buffer.seek(0)
 
                 st.success("✅ Audit complete!")
 
                 st.download_button(
-                    label="Download Results",
-                    data=output,
+                    label="Download Multiple Sold To Duplicates.xlsx",
+                    data=buffer,
                     file_name="Multiple Sold To Duplicates.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            else:
-                st.info("No groups found with multiple 'Sold To' rows.")
 
+            else:
+                st.info("No duplicate groups found with multiple 'Sold To' rows.")
+
+            # --- Summary ---
             st.subheader("📋 Summary")
             for name, total, flagged in summary:
-                st.write(f"**{name}** → Groups: {total}, Flagged: {flagged}")
+                st.write(f"**{name}** → Groups Reviewed: {total}, Flagged: {flagged}")
