@@ -28,12 +28,36 @@ with st.expander("ℹ️ How this works"):
 
 def safe_read_excel(file):
     try:
+        # Attempt normal read first
         df = pd.read_excel(file, skiprows=4, engine="openpyxl")
-    except Exception:
-        file.seek(0)
-        df = pd.read_excel(file, engine="openpyxl")
 
+    except Exception:
+
+        st.warning("⚠️ File appears corrupted. Using recovery mode...")
+
+        try:
+            file.seek(0)
+
+            # Read raw data safely (no structure assumptions)
+            df = pd.read_excel(file, header=None, engine="openpyxl")
+
+            # Drop completely empty rows
+            df = df.dropna(how="all")
+
+            # Drop empty columns
+            df = df.dropna(axis=1, how="all")
+
+            # Use first valid row as header
+            df.columns = df.iloc[0].astype(str)
+            df = df[1:].reset_index(drop=True)
+
+        except Exception:
+            st.error("❌ This file cannot be read due to severe formatting issues.\n\n✅ Fix: Open the file in Excel → Copy all → Paste into a new file → Upload again.")
+            st.stop()
+
+    # Final cleanup
     df.columns = [str(col).strip() for col in df.columns]
+
     return df
 
 
