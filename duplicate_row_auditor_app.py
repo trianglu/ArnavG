@@ -7,7 +7,7 @@ import pandas as pd
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 
 st.title("📊 Duplicate Row Auditor")
-st.write("Streaming mode enabled: Safe for large uploads (40+ files).")
+st.write("Streaming processing enabled for large uploads (40+ files).")
 
 uploaded_files = st.file_uploader(
     "Upload Excel files",
@@ -61,43 +61,56 @@ def safe_copy_fill(cell):
     except:
         return None
 
-# ---------- RUN BUTTON ----------
+# ---------- MAIN RUN ----------
 if st.button("Run Audit"):
 
     if not uploaded_files:
-        st.warning("Upload files first.")
+        st.warning("⚠️ Upload files first.")
         st.stop()
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
 
     st.session_state.results = []
     st.session_state.processed_count = 0
 
+    progress = st.progress(0)
+    status = st.empty()
+
+    # ✅ Header optimization (ONLY ONCE)
+    master_headers = None
+    master_acc_idx = None
+
     for i, file in enumerate(uploaded_files):
 
         try:
-            status_text.text(f"Processing {file.name} ({i+1}/{len(uploaded_files)})")
+            status.text(f"Processing {file.name} ({i+1}/{len(uploaded_files)})")
 
             wb = load_workbook(file, data_only=True)
             ws = wb.active
 
             rows = list(ws.iter_rows())
+
             if not rows:
                 continue
 
             raw_headers = [cell.value for cell in rows[0]]
-            headers = clean_headers(raw_headers)
 
-            normalized_headers = [normalize(h) for h in raw_headers]
+            # ✅ First file defines structure
+            if master_headers is None:
+                master_headers = clean_headers(raw_headers)
 
-            if "accountgroup" not in normalized_headers:
-                continue
+                normalized_headers = [normalize(h) for h in raw_headers]
 
-            acc_idx = normalized_headers.index("accountgroup")
+                if "accountgroup" not in normalized_headers:
+                    st.error("❌ AccountGroup column not found in first file")
+                    st.stop()
 
-            current_group = []
+                master_acc_idx = normalized_headers.index("accountgroup")
+
+            headers = master_headers
+            acc_idx = master_acc_idx
+
+            # ---------- GROUP DETECTION ----------
             groups = []
+            current_group = []
 
             for row in rows[1:]:
                 if is_highlighted(row):
@@ -110,6 +123,7 @@ if st.button("Run Audit"):
             if current_group:
                 groups.append(current_group)
 
+            # ---------- RULE CHECK ----------
             for group in groups:
 
                 sold_to_count = sum(
@@ -125,17 +139,23 @@ if st.button("Run Audit"):
                         (severity, file.name, group, headers, acc_idx, sold_to_count)
                     )
 
-            st.session_state.processed_count += 1
-
         except Exception as e:
             st.warning(f"⚠️ Error processing {file.name}: {str(e)}")
 
-        # ✅ Update progress LIVE
-        progress_bar.progress((i + 1) / len(uploaded_files))
+        # ✅ Clean memory
+        try:
+            del wb
+            del ws
+        except:
+            pass
 
-    status_text.text("✅ Processing complete!")
+        # ✅ Update progress
+        progress.progress((i + 1) / len(uploaded_files))
+        st.session_state.processed_count += 1
 
-# ---------- DISPLAY (PERSISTS) ----------
+    status.text("✅ Processing complete!")
+
+# ---------- DISPLAY ----------
 if st.session_state.results:
 
     priority_order = {"CRITICAL": 0, "WARNING": 1}
