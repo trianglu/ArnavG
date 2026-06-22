@@ -7,7 +7,7 @@ import pandas as pd
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 
 st.title("📊 Duplicate Row Auditor")
-st.write("Streaming processing with summary + compiled export.")
+st.write("One-click audit + export enabled.")
 
 uploaded_files = st.file_uploader(
     "Upload Excel files",
@@ -22,14 +22,11 @@ if "results" not in st.session_state:
 if "summary" not in st.session_state:
     st.session_state.summary = {}
 
-if "run" not in st.session_state:
-    st.session_state.run = False
+if "export_file" not in st.session_state:
+    st.session_state.export_file = None
 
 # ---------- BUTTON ----------
-if st.button("Run Audit"):
-    st.session_state.run = True
-    st.session_state.results = []
-    st.session_state.summary = {}
+run_clicked = st.button("🚀 Run Audit & Generate Export")
 
 # ---------- HELPERS ----------
 def normalize(col):
@@ -63,7 +60,10 @@ def safe_copy_fill(cell):
         return None
 
 # ---------- PROCESS ----------
-if uploaded_files and st.session_state.run:
+if run_clicked and uploaded_files:
+
+    st.session_state.results = []
+    st.session_state.summary = {}
 
     progress = st.progress(0)
     status = st.empty()
@@ -90,8 +90,8 @@ if uploaded_files and st.session_state.run:
 
             if master_headers is None:
                 master_headers = clean_headers(raw_headers)
-
                 normalized = [normalize(h) for h in raw_headers]
+
                 if "accountgroup" not in normalized:
                     st.error("AccountGroup column missing.")
                     st.stop()
@@ -137,7 +137,6 @@ if uploaded_files and st.session_state.run:
         except Exception as e:
             st.warning(f"⚠️ {file.name} failed: {str(e)}")
 
-        # ✅ store per-file summary
         st.session_state.summary[file.name] = {
             "CRITICAL": file_critical,
             "WARNING": file_warning,
@@ -147,16 +146,75 @@ if uploaded_files and st.session_state.run:
         progress.progress((i + 1) / len(uploaded_files))
 
     status.text("✅ Processing complete")
-    st.session_state.run = False
 
-# ---------- DISPLAY ----------
+    # ✅ BUILD EXPORT FILE ONCE
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # SUMMARY SHEET
+    summary_ws = wb.create_sheet("SUMMARY")
+    summary_ws.append(["File", "Critical", "Warning", "Total"])
+
+    for fname, vals in st.session_state.summary.items():
+        summary_ws.append([
+            fname,
+            vals["CRITICAL"],
+            vals["WARNING"],
+            vals["TOTAL"]
+        ])
+
+    # DATA SHEETS
+    sheets = {
+        "CRITICAL": wb.create_sheet("CRITICAL"),
+        "WARNING": wb.create_sheet("WARNING")
+    }
+
+    headers = st.session_state.results[0][3] if st.session_state.results else []
+
+    for name, ws in sheets.items():
+        ws.append(["Priority", "Source File"] + headers)
+
+    for severity, file_name, group, headers, acc_idx, sold_to_count in st.session_state.results:
+
+        ws = sheets[severity]
+
+        for row in group:
+            vals = [c.value for c in row]
+            ws.append([severity, file_name] + vals)
+
+            for col_idx, cell in enumerate(row):
+                out_cell = ws.cell(row=ws.max_row, column=col_idx + 3)
+                fill = safe_copy_fill(cell)
+                if fill:
+                    try:
+                        out_cell.fill = fill
+                    except:
+                        pass
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    st.session_state.export_file = buffer
+
+# ---------- ONE-CLICK DOWNLOAD (TOP) ----------
+if st.session_state.export_file:
+
+    st.subheader("📥 One-Click Export")
+
+    st.download_button(
+        "⬇️ Download Compiled Excel Report",
+        data=st.session_state.export_file,
+        file_name="Multiple Sold To Duplicates.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# ---------- PREVIEW ----------
 if st.session_state.results:
-
-    results = sorted(st.session_state.results, key=lambda x: 0 if x[0]=="CRITICAL" else 1)
 
     st.subheader("🔍 Preview")
 
-    for severity, file_name, group, headers, acc_idx, sold_to_count in results:
+    for severity, file_name, group, headers, acc_idx, sold_to_count in st.session_state.results:
 
         label = "🚨 Critical" if severity == "CRITICAL" else "⚠️ Warning"
 
@@ -169,61 +227,12 @@ if st.session_state.results:
 
             st.dataframe(df, width="stretch")
 
-    # ---------- EXPORT ----------
-    wb = Workbook()
-    wb.remove(wb.active)
+# ---------- BACKUP DOWNLOAD (BOTTOM) ----------
+if st.session_state.export_file:
 
-    # ✅ SUMMARY SHEET
-    summary_ws = wb.create_sheet("SUMMARY")
-    summary_ws.append(["File", "Critical", "Warning", "Total"])
-
-    for fname, vals in st.session_state.summary.items():
-        summary_ws.append([
-            fname,
-            vals["CRITICAL"],
-            vals["WARNING"],
-            vals["TOTAL"]
-        ])
-
-    # ✅ DATA SHEETS
-    sheets = {
-        "CRITICAL": wb.create_sheet("CRITICAL"),
-        "WARNING": wb.create_sheet("WARNING")
-    }
-
-    headers = results[0][3]
-
-    for name, ws in sheets.items():
-        ws.append(["Priority", "Source File"] + headers)
-
-    for severity, file_name, group, headers, acc_idx, sold_to_count in results:
-
-        ws = sheets[severity]
-
-        for row in group:
-            vals = [c.value for c in row]
-            ws.append([severity, file_name] + vals)
-
-            for col_idx, cell in enumerate(row):
-                out_cell = ws.cell(row=ws.max_row, column=col_idx + 3)
-
-                fill = safe_copy_fill(cell)
-                if fill:
-                    try:
-                        out_cell.fill = fill
-                    except:
-                        pass
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    st.success("✅ Export ready")
-
-    # ✅ ALWAYS SHOWS NOW
     st.download_button(
-        "📥 Download Single Compiled Excel",
-        data=buffer,
+        "⬇️ Download Again",
+        data=st.session_state.export_file,
         file_name="Multiple Sold To Duplicates.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
