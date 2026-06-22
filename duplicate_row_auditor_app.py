@@ -170,6 +170,7 @@ if st.session_state.results:
             st.markdown(f"**✅ Sold To Count: {sold_to_count}**")
 
     # ✅ EXPORT WITH MULTIPLE SHEETS
+    # ✅ EXPORT WITH STRICT GROUP VALIDATION
     st.divider()
     st.subheader("📥 Export Results")
     
@@ -183,22 +184,10 @@ if st.session_state.results:
         default_sheet = out_wb.active
         out_wb.remove(default_sheet)
     
-        # Create 3 sheets
-        sheet_groups = {
-            "2+ Sold To": [],
-            "1 Sold To": [],
-            "0 Sold To": []
-        }
-    
-        # ✅ Categorize groups
-        for file_name, group, headers, acc_idx, sold_to_count in all_results:
-    
-            if sold_to_count >= 2:
-                sheet_groups["2+ Sold To"].append((file_name, group))
-            elif sold_to_count == 1:
-                sheet_groups["1 Sold To"].append((file_name, group))
-            else:
-                sheet_groups["0 Sold To"].append((file_name, group))
+        # Create sheets
+        ws_2plus = out_wb.create_sheet(title="2+ Sold To")
+        ws_1 = out_wb.create_sheet(title="1 Sold To")
+        ws_0 = out_wb.create_sheet(title="0 Sold To")
     
         # ✅ Safe fill copy
         def safe_copy_fill(cell):
@@ -213,49 +202,58 @@ if st.session_state.results:
             except:
                 return None
     
-        # ✅ Build each sheet
-        for sheet_name, groups in sheet_groups.items():
+        # ✅ Helper function to write groups
+        def write_group(ws, file_name, group, headers):
+            # separator row
+            ws.append([f"--- {file_name} ---"] + [""] * len(headers))
     
-            ws = out_wb.create_sheet(title=sheet_name)
+            for row in group:
+                values = [cell.value for cell in row]
+                ws.append([file_name] + values)
     
-            if not groups:
-                ws.append(["No data found"])
-                continue
+                for col_idx, cell in enumerate(row):
+                    out_cell = ws.cell(row=ws.max_row, column=col_idx + 2)
     
-            # Use headers from first group
-            first_headers = headers
+                    fill = safe_copy_fill(cell)
+                    if fill:
+                        try:
+                            out_cell.fill = fill
+                        except:
+                            pass
+    
+        # ✅ Write headers ONCE per sheet
+        first_headers = all_results[0][2]
+    
+        for ws in [ws_2plus, ws_1, ws_0]:
             ws.append(["Source File"] + first_headers)
     
-            for file_name, group in groups:
+        # ✅ MAIN LOOP (STRICT CLASSIFICATION)
+        for file_name, group, headers, acc_idx, _ in all_results:
     
-                # separator row
-                ws.append([f"--- {file_name} ---"] + [""] * len(first_headers))
+            # 🔥 Recalculate Sold-To count (important safety step)
+            sold_to_count = sum(
+                1 for r in group
+                if r[acc_idx].value and "sold to" in str(r[acc_idx].value).lower()
+            )
     
-                for row in group:
-                    values = [cell.value for cell in row]
-                    ws.append([file_name] + values)
+            # ✅ Strict routing
+            if sold_to_count >= 2:
+                target_ws = ws_2plus
+            elif sold_to_count == 1:
+                target_ws = ws_1
+            else:
+                target_ws = ws_0
     
-                    # preserve highlight colors
-                    for col_idx, cell in enumerate(row):
-                        out_cell = ws.cell(
-                            row=ws.max_row,
-                            column=col_idx + 2
-                        )
+            # ✅ Write group ONLY to correct sheet
+            write_group(target_ws, file_name, group, headers)
     
-                        fill = safe_copy_fill(cell)
-                        if fill:
-                            try:
-                                out_cell.fill = fill
-                            except:
-                                pass
-    
-        # ✅ Save + Download
+        # ✅ Save file
         buffer = io.BytesIO()
         out_wb.save(buffer)
         buffer.seek(0)
     
         st.download_button(
-            "Download Multi-Sheet Duplicate Audit.xlsx",
+            "Download Multiple Sold To Duplicates.xlsx",
             buffer,
             file_name="Multiple Sold To Duplicates.xlsx"
         )
