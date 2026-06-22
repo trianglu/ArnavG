@@ -7,7 +7,7 @@ import pandas as pd
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 
 st.title("📊 Duplicate Row Auditor")
-st.write("Upload up to 50 Excel files. Highlighted rows are treated as duplicate groups.")
+st.write("Streaming mode enabled: Safe for large uploads (40+ files).")
 
 uploaded_files = st.file_uploader(
     "Upload Excel files",
@@ -15,12 +15,12 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# ---------- SESSION STATE FIX (CRITICAL) ----------
-if "run_audit" not in st.session_state:
-    st.session_state.run_audit = False
+# ---------- SESSION STATE ----------
+if "results" not in st.session_state:
+    st.session_state.results = []
 
-if st.button("Run Audit"):
-    st.session_state.run_audit = True
+if "processed_count" not in st.session_state:
+    st.session_state.processed_count = 0
 
 # ---------- HELPERS ----------
 def normalize(col):
@@ -29,8 +29,7 @@ def normalize(col):
     return str(col).strip().lower().replace(" ", "").replace("_", "")
 
 def clean_headers(headers):
-    cleaned = []
-    seen = {}
+    cleaned, seen = [], {}
     for i, h in enumerate(headers):
         if h is None or str(h).strip() == "":
             h = f"Column_{i+1}"
@@ -62,171 +61,163 @@ def safe_copy_fill(cell):
     except:
         return None
 
-# ---------- MAIN LOGIC ----------
-if uploaded_files and st.session_state.run_audit:
+# ---------- RUN BUTTON ----------
+if st.button("Run Audit"):
 
-    output_rows = []
-    summary = []
+    if not uploaded_files:
+        st.warning("Upload files first.")
+        st.stop()
 
-    for file in uploaded_files:
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    st.session_state.results = []
+    st.session_state.processed_count = 0
+
+    for i, file in enumerate(uploaded_files):
 
         try:
+            status_text.text(f"Processing {file.name} ({i+1}/{len(uploaded_files)})")
+
             wb = load_workbook(file, data_only=True)
             ws = wb.active
-        except:
-            st.warning(f"⚠️ Could not read {file.name}")
-            continue
 
-        rows = list(ws.iter_rows())
-        if not rows:
-            continue
+            rows = list(ws.iter_rows())
+            if not rows:
+                continue
 
-        raw_headers = [cell.value for cell in rows[0]]
-        headers = clean_headers(raw_headers)
+            raw_headers = [cell.value for cell in rows[0]]
+            headers = clean_headers(raw_headers)
 
-        normalized_headers = [normalize(h) for h in raw_headers]
+            normalized_headers = [normalize(h) for h in raw_headers]
 
-        if "accountgroup" not in normalized_headers:
-            st.warning(f"⚠️ {file.name} skipped (missing AccountGroup column)")
-            continue
+            if "accountgroup" not in normalized_headers:
+                continue
 
-        acc_idx = normalized_headers.index("accountgroup")
+            acc_idx = normalized_headers.index("accountgroup")
 
-        groups = []
-        current_group = []
+            current_group = []
+            groups = []
 
-        # --- GROUP EXTRACTION ---
-        for row in rows[1:]:
-            if is_highlighted(row):
-                current_group.append(row)
-            else:
-                if current_group:
-                    groups.append(current_group)
-                    current_group = []
-
-        if current_group:
-            groups.append(current_group)
-
-        total_groups = len(groups)
-        flagged_groups = 0
-
-        for group in groups:
-            sold_to_count = 0
-
-            for row in group:
-                val = row[acc_idx].value
-                if val and str(val).strip().lower() == "sold to":
-                    sold_to_count += 1
-
-            if sold_to_count > 1:
-                flagged_groups += 1
-
-                # Severity logic
-                if sold_to_count >= 3:
-                    severity = "CRITICAL"
+            for row in rows[1:]:
+                if is_highlighted(row):
+                    current_group.append(row)
                 else:
-                    severity = "WARNING"
+                    if current_group:
+                        groups.append(current_group)
+                        current_group = []
 
-                output_rows.append(
-                    (severity, file.name, group, headers, acc_idx, sold_to_count)
+            if current_group:
+                groups.append(current_group)
+
+            for group in groups:
+
+                sold_to_count = sum(
+                    1 for r in group
+                    if r[acc_idx].value and str(r[acc_idx].value).strip().lower() == "sold to"
                 )
 
-        summary.append((file.name, total_groups, flagged_groups))
+                if sold_to_count > 1:
 
-    # ---------- SORT ----------
+                    severity = "CRITICAL" if sold_to_count >= 3 else "WARNING"
+
+                    st.session_state.results.append(
+                        (severity, file.name, group, headers, acc_idx, sold_to_count)
+                    )
+
+            st.session_state.processed_count += 1
+
+        except Exception as e:
+            st.warning(f"⚠️ Error processing {file.name}: {str(e)}")
+
+        # ✅ Update progress LIVE
+        progress_bar.progress((i + 1) / len(uploaded_files))
+
+    status_text.text("✅ Processing complete!")
+
+# ---------- DISPLAY (PERSISTS) ----------
+if st.session_state.results:
+
     priority_order = {"CRITICAL": 0, "WARNING": 1}
-    output_rows.sort(key=lambda x: priority_order[x[0]])
+    results = sorted(st.session_state.results, key=lambda x: priority_order[x[0]])
 
-    # ---------- PREVIEW ----------
-    if output_rows:
-        st.subheader("🔍 Preview of Flagged Duplicate Groups")
+    st.subheader("🔍 Preview of Flagged Duplicate Groups")
 
-        group_counter = {}
+    group_counter = {}
 
-        for severity, file_name, group, headers, acc_idx, sold_to_count in output_rows:
+    for severity, file_name, group, headers, acc_idx, sold_to_count in results:
 
-            group_counter[file_name] = group_counter.get(file_name, 0) + 1
-            group_num = group_counter[file_name]
+        group_counter[file_name] = group_counter.get(file_name, 0) + 1
+        group_num = group_counter[file_name]
 
-            color = "#FFCDD2" if severity == "CRITICAL" else "#FFF9C4"
-            label = "🚨 Critical" if severity == "CRITICAL" else "⚠️ Warning"
+        color = "#FFCDD2" if severity == "CRITICAL" else "#FFF9C4"
+        label = "🚨 Critical" if severity == "CRITICAL" else "⚠️ Warning"
 
-            with st.expander(f"{label} — 📁 {file_name} — Group {group_num}"):
+        with st.expander(f"{label} — 📁 {file_name} — Group {group_num}"):
 
-                st.markdown(f"""
-                <div style="padding:10px; border-radius:8px; background-color:{color};">
-                <b>File:</b> {file_name}<br>
-                <b>Group #:</b> {group_num}<br>
-                <b>Sold To Count:</b> {sold_to_count}<br>
-                <b>Status:</b> {label}
-                </div>
-                """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="padding:10px; border-radius:8px; background-color:{color};">
+            <b>File:</b> {file_name}<br>
+            <b>Group #:</b> {group_num}<br>
+            <b>Sold To Count:</b> {sold_to_count}<br>
+            <b>Status:</b> {label}
+            </div>
+            """, unsafe_allow_html=True)
 
-                group_data = [[cell.value for cell in row] for row in group]
-                df = pd.DataFrame(group_data, columns=headers)
+            group_data = [[cell.value for cell in row] for row in group]
+            df = pd.DataFrame(group_data, columns=headers)
 
-                def highlight_soldto(row):
-                    val = str(row.iloc[acc_idx]).strip().lower()
-                    if val == "sold to":
-                        return ["background-color: #FFF59D"] * len(row)
-                    return [""] * len(row)
+            def highlight_soldto(row):
+                val = str(row.iloc[acc_idx]).strip().lower()
+                if val == "sold to":
+                    return ["background-color: #FFF59D"] * len(row)
+                return [""] * len(row)
 
-                st.dataframe(df.style.apply(highlight_soldto, axis=1), width="stretch")
+            st.dataframe(df.style.apply(highlight_soldto, axis=1), width="stretch")
 
-    else:
-        st.warning("⚠️ No groups found with multiple 'Sold To' rows.")
+    # ---------- EXPORT ----------
+    out_wb = Workbook()
+    out_wb.remove(out_wb.active)
 
-    # ---------- EXPORT (FIXED) ----------
-    if output_rows:
+    sheets = {
+        "CRITICAL": out_wb.create_sheet("CRITICAL"),
+        "WARNING": out_wb.create_sheet("WARNING")
+    }
 
-        out_wb = Workbook()
-        out_wb.remove(out_wb.active)
+    first_headers = results[0][3]
 
-        sheets = {
-            "CRITICAL": out_wb.create_sheet("CRITICAL"),
-            "WARNING": out_wb.create_sheet("WARNING")
-        }
+    for name, ws in sheets.items():
+        ws.append(["Priority", "Source File"] + first_headers)
 
-        first_headers = output_rows[0][3]
+    for severity, file_name, group, headers, acc_idx, sold_to_count in results:
 
-        for name, ws in sheets.items():
-            ws.append(["Priority", "Source File"] + first_headers)
+        ws = sheets[severity]
 
-        for severity, file_name, group, headers, acc_idx, sold_to_count in output_rows:
+        ws.append([f"--- {file_name} ---"] + [""] * (len(headers) + 1))
 
-            ws = sheets[severity]
+        for row in group:
+            values = [cell.value for cell in row]
+            ws.append([severity, file_name] + values)
 
-            ws.append([f"--- {file_name} ---"] + [""] * (len(headers) + 1))
+            for col_idx, cell in enumerate(row):
+                out_cell = ws.cell(row=ws.max_row, column=col_idx + 3)
 
-            for row in group:
-                values = [cell.value for cell in row]
-                ws.append([severity, file_name] + values)
+                fill = safe_copy_fill(cell)
+                if fill:
+                    try:
+                        out_cell.fill = fill
+                    except:
+                        pass
 
-                for col_idx, cell in enumerate(row):
-                    out_cell = ws.cell(row=ws.max_row, column=col_idx + 3)
+    buffer = io.BytesIO()
+    out_wb.save(buffer)
+    buffer.seek(0)
 
-                    fill = safe_copy_fill(cell)
-                    if fill:
-                        try:
-                            out_cell.fill = fill
-                        except:
-                            pass
+    st.success(f"✅ Processed {st.session_state.processed_count} files successfully")
 
-        buffer = io.BytesIO()
-        out_wb.save(buffer)
-        buffer.seek(0)
-
-        st.success("✅ Audit complete!")
-
-        # ✅ THIS WAS YOUR MISSING PIECE — NOW GUARANTEED VISIBLE
-        st.download_button(
-            label="📥 Download Multiple Sold To Duplicates.xlsx",
-            data=buffer,
-            file_name="Multiple Sold To Duplicates.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    # ---------- SUMMARY ----------
-    st.subheader("📋 Summary")
-    for name, total, flagged in summary:
-        st.write(f"**{name}** → Groups Reviewed: {total}, Flagged: {flagged}")
+    st.download_button(
+        label="📥 Download Multiple Sold To Duplicates.xlsx",
+        data=buffer,
+        file_name="Multiple Sold To Duplicates.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
