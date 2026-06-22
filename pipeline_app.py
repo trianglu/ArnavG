@@ -55,7 +55,7 @@ def normalize(s):
 # ------------------ PIPELINE ------------------
 
 def run_pipeline(df, name_col, address_col):
-    df = df.iloc[:, 1:].reset_index(drop=True)
+    df = df.reset_index(drop=True)
 
     df["norm_name"] = df[name_col].apply(normalize)
     df["norm_address"] = df[address_col].apply(normalize)
@@ -205,7 +205,14 @@ if uploaded_file:
     if st.button("🚀 Run Pipeline"):
 
         with st.spinner("Processing..."):
-            result = run_pipeline(df_raw, name_col, address_col)
+            df_clean = df_raw.iloc[:, 1:].copy()
+            
+            # Detect columns AFTER removing junk column
+            name_col = find_column(df_clean, ["name"])
+            address_col = find_column(df_clean, ["address"])
+            state_col = find_column(df_clean, ["state"])
+            
+            result = run_pipeline(df_clean, name_col, address_col)
             excel_file = build_file(result)
 
         st.success("✅ Pipeline Complete!")
