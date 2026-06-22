@@ -7,7 +7,12 @@ import pandas as pd
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 
 st.title("📊 Duplicate Row Auditor")
-st.write("One-click audit + export enabled.")
+
+# --- Controls ---
+group_filter = st.selectbox(
+    "Filter Groups",
+    ["All", "🚨 Critical Only", "⚠️ Warning Only"]
+)
 
 uploaded_files = st.file_uploader(
     "Upload Excel files",
@@ -15,224 +20,202 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# ---------- SESSION ----------
-if "results" not in st.session_state:
-    st.session_state.results = []
-
-if "summary" not in st.session_state:
-    st.session_state.summary = {}
-
-if "export_file" not in st.session_state:
-    st.session_state.export_file = None
-
-# ---------- BUTTON ----------
-run_clicked = st.button("🚀 Run Audit & Generate Export")
-
-# ---------- HELPERS ----------
+# --- Helpers ---
 def normalize(col):
-    return str(col).strip().lower().replace(" ", "").replace("_", "") if col else ""
+    if not col:
+        return ""
+    return str(col).strip().lower().replace(" ", "").replace("_", "")
 
 def clean_headers(headers):
-    cleaned, seen = [], {}
+    cleaned = []
+    seen = {}
     for i, h in enumerate(headers):
-        h = f"Column_{i+1}" if not h else str(h).strip()
+        if h is None or str(h).strip() == "":
+            h = f"Column_{i+1}"
+        else:
+            h = str(h).strip()
+
         if h in seen:
             seen[h] += 1
             h = f"{h}_{seen[h]}"
         else:
             seen[h] = 0
+
         cleaned.append(h)
     return cleaned
 
 def is_highlighted(row):
     return any(cell.fill and cell.fill.fill_type for cell in row)
 
-def safe_copy_fill(cell):
-    try:
-        if not cell.fill or not cell.fill.fill_type:
-            return None
-        return PatternFill(
-            start_color=cell.fill.start_color.rgb,
-            end_color=cell.fill.end_color.rgb,
-            fill_type=cell.fill.fill_type
-        )
-    except:
+# ✅ FIXED logic (KEY CHANGE)
+def is_sold_to(val):
+    return val and "sold to" in str(val).lower()
+
+# ✅ caching
+@st.cache_data
+def process_file(file_bytes, filename):
+
+    wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows())
+
+    if not rows:
         return None
 
-# ---------- PROCESS ----------
-if run_clicked and uploaded_files:
+    raw_headers = [cell.value for cell in rows[0]]
+    headers = clean_headers(raw_headers)
+    normalized_headers = [normalize(h) for h in raw_headers]
 
-    st.session_state.results = []
-    st.session_state.summary = {}
+    if "accountgroup" not in normalized_headers:
+        return None
 
-    progress = st.progress(0)
-    status = st.empty()
+    acc_idx = normalized_headers.index("accountgroup")
 
-    master_headers = None
-    master_acc_idx = None
+    groups = []
+    current_group = []
 
-    for i, file in enumerate(uploaded_files):
-
-        file_critical = 0
-        file_warning = 0
-
-        try:
-            status.text(f"Processing {file.name} ({i+1}/{len(uploaded_files)})")
-
-            wb = load_workbook(file, data_only=True)
-            ws = wb.active
-
-            rows = list(ws.iter_rows())
-            if not rows:
-                continue
-
-            raw_headers = [cell.value for cell in rows[0]]
-
-            if master_headers is None:
-                master_headers = clean_headers(raw_headers)
-                normalized = [normalize(h) for h in raw_headers]
-
-                if "accountgroup" not in normalized:
-                    st.error("AccountGroup column missing.")
-                    st.stop()
-
-                master_acc_idx = normalized.index("accountgroup")
-
-            headers = master_headers
-            acc_idx = master_acc_idx
-
-            current_group = []
-            groups = []
-
-            for row in rows[1:]:
-                if is_highlighted(row):
-                    current_group.append(row)
-                else:
-                    if current_group:
-                        groups.append(current_group)
-                        current_group = []
-
+    for row in rows[1:]:
+        if is_highlighted(row):
+            current_group.append(row)
+        else:
             if current_group:
                 groups.append(current_group)
+                current_group = []
 
-            for group in groups:
+    if current_group:
+        groups.append(current_group)
 
-                sold_to_count = sum(
-                    1 for r in group
-                    if r[acc_idx].value and str(r[acc_idx].value).strip().lower() == "sold to"
-                )
+    output = []
 
-                if sold_to_count > 1:
-                    severity = "CRITICAL" if sold_to_count >= 3 else "WARNING"
+    for group in groups:
+        sold_to_count = sum(
+            1 for r in group if is_sold_to(r[acc_idx].value)
+        )
 
-                    if severity == "CRITICAL":
-                        file_critical += 1
-                    else:
-                        file_warning += 1
+        # ✅ ONLY include valid groups
+        if sold_to_count >= 2:
+            output.append((filename, group, headers, acc_idx, sold_to_count))
 
-                    st.session_state.results.append(
-                        (severity, file.name, group, headers, acc_idx, sold_to_count)
-                    )
+    return output
 
-        except Exception as e:
-            st.warning(f"⚠️ {file.name} failed: {str(e)}")
 
-        st.session_state.summary[file.name] = {
-            "CRITICAL": file_critical,
-            "WARNING": file_warning,
-            "TOTAL": file_critical + file_warning
-        }
+# --- Session storage ---
+if "results" not in st.session_state:
+    st.session_state.results = None
 
-        progress.progress((i + 1) / len(uploaded_files))
 
-    status.text("✅ Processing complete")
+# --- Run Audit ---
+if uploaded_files:
+    if st.button("Run Audit"):
 
-    # ✅ BUILD EXPORT FILE ONCE
-    wb = Workbook()
-    wb.remove(wb.active)
+        with st.spinner("🔄 Processing..."):
 
-    # SUMMARY SHEET
-    summary_ws = wb.create_sheet("SUMMARY")
-    summary_ws.append(["File", "Critical", "Warning", "Total"])
+            all_results = []
 
-    for fname, vals in st.session_state.summary.items():
-        summary_ws.append([
-            fname,
-            vals["CRITICAL"],
-            vals["WARNING"],
-            vals["TOTAL"]
-        ])
+            for file in uploaded_files:
+                file_bytes = file.read()
+                result = process_file(file_bytes, file.name)
 
-    # DATA SHEETS
-    sheets = {
-        "CRITICAL": wb.create_sheet("CRITICAL"),
-        "WARNING": wb.create_sheet("WARNING")
-    }
+                if result:
+                    all_results.extend(result)
+                else:
+                    st.warning(f"⚠️ {file.name} skipped (missing AccountGroup)")
 
-    headers = st.session_state.results[0][3] if st.session_state.results else []
+            all_results = sorted(all_results, key=lambda x: x[4], reverse=True)
+            st.session_state.results = all_results
 
-    for name, ws in sheets.items():
-        ws.append(["Priority", "Source File"] + headers)
+            st.success("✅ Audit complete!")
 
-    for severity, file_name, group, headers, acc_idx, sold_to_count in st.session_state.results:
 
-        ws = sheets[severity]
-
-        for row in group:
-            vals = [c.value for c in row]
-            ws.append([severity, file_name] + vals)
-
-            for col_idx, cell in enumerate(row):
-                out_cell = ws.cell(row=ws.max_row, column=col_idx + 3)
-                fill = safe_copy_fill(cell)
-                if fill:
-                    try:
-                        out_cell.fill = fill
-                    except:
-                        pass
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    st.session_state.export_file = buffer
-
-# ---------- ONE-CLICK DOWNLOAD (TOP) ----------
-if st.session_state.export_file:
-
-    st.subheader("📥 One-Click Export")
-
-    st.download_button(
-        "⬇️ Download Compiled Excel Report",
-        data=st.session_state.export_file,
-        file_name="Multiple Sold To Duplicates.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-# ---------- PREVIEW ----------
+# --- Display Results ---
 if st.session_state.results:
 
-    st.subheader("🔍 Preview")
+    all_results = st.session_state.results
 
-    for severity, file_name, group, headers, acc_idx, sold_to_count in st.session_state.results:
+    # ✅ Filtering
+    filtered = all_results
+    if group_filter == "🚨 Critical Only":
+        filtered = [x for x in all_results if x[4] >= 3]
+    elif group_filter == "⚠️ Warning Only":
+        filtered = [x for x in all_results if x[4] == 2]
 
-        label = "🚨 Critical" if severity == "CRITICAL" else "⚠️ Warning"
+    # ✅ Preview
+    st.subheader("🔍 Preview of Flagged Groups")
 
-        with st.expander(f"{label} — {file_name}"):
+    group_counter = {}
 
-            df = pd.DataFrame(
-                [[c.value for c in row] for row in group],
-                columns=headers
-            )
+    for file_name, group, headers, acc_idx, sold_to_count in filtered:
 
+        group_counter[file_name] = group_counter.get(file_name, 0) + 1
+        group_num = group_counter[file_name]
+
+        severity = "🚨 Critical" if sold_to_count >= 3 else "⚠️ Warning"
+
+        with st.expander(f"{file_name} — Group {group_num} | {severity}"):
+
+            group_data = [[cell.value for cell in row] for row in group]
+
+            MAX_ROWS = 50
+            if len(group_data) > MAX_ROWS:
+                st.warning(f"Showing first {MAX_ROWS} rows only")
+
+            df = pd.DataFrame(group_data[:MAX_ROWS], columns=headers)
             st.dataframe(df, width="stretch")
 
-# ---------- BACKUP DOWNLOAD (BOTTOM) ----------
-if st.session_state.export_file:
+            st.markdown(f"**✅ Sold To Count: {sold_to_count}**")
 
-    st.download_button(
-        "⬇️ Download Again",
-        data=st.session_state.export_file,
-        file_name="Multiple Sold To Duplicates.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+
+    # ✅ EXPORT SECTION (FIXED + ALWAYS VISIBLE)
+    st.divider()
+    st.subheader("📥 Export Results")
+
+    if st.button("Generate Excel File"):
+
+        out_wb = Workbook()
+        out_ws = out_wb.active
+
+        first_headers = all_results[0][2]
+        out_ws.append(["Source File"] + first_headers)
+
+        def safe_copy_fill(cell):
+            try:
+                if not cell.fill or not cell.fill.fill_type:
+                    return None
+                return PatternFill(
+                    start_color=cell.fill.start_color.rgb,
+                    end_color=cell.fill.end_color.rgb,
+                    fill_type=cell.fill.fill_type
+                )
+            except:
+                return None
+
+        for file_name, group, headers, acc_idx, sold_to_count in all_results:
+
+            out_ws.append([f"--- {file_name} ---"] + [""] * len(headers))
+
+            for row in group:
+                values = [cell.value for cell in row]
+                out_ws.append([file_name] + values)
+
+                for col_idx, cell in enumerate(row):
+                    out_cell = out_ws.cell(
+                        row=out_ws.max_row,
+                        column=col_idx + 2
+                    )
+
+                    fill = safe_copy_fill(cell)
+                    if fill:
+                        try:
+                            out_cell.fill = fill
+                        except:
+                            pass
+
+        buffer = io.BytesIO()
+        out_wb.save(buffer)
+        buffer.seek(0)
+
+        st.download_button(
+            "Download Multiple Sold To Duplicates.xlsx",
+            buffer,
+            file_name="Multiple Sold To Duplicates.xlsx"
+        )
