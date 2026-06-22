@@ -21,7 +21,7 @@ def normalize(col):
         return ""
     return str(col).strip().lower().replace(" ", "").replace("_", "")
 
-# --- Create safe, unique headers ---
+# --- Clean & deduplicate headers ---
 def clean_headers(headers):
     cleaned = []
     seen = {}
@@ -32,7 +32,6 @@ def clean_headers(headers):
         else:
             h = str(h).strip()
 
-        # Ensure uniqueness
         if h in seen:
             seen[h] += 1
             h = f"{h}_{seen[h]}"
@@ -47,7 +46,7 @@ def clean_headers(headers):
 def is_highlighted(row):
     return any(cell.fill and cell.fill.fill_type for cell in row)
 
-# --- Safe fill copy ---
+# --- Safe fill copy (fixes StyleProxy crash) ---
 def safe_copy_fill(cell):
     try:
         if not cell.fill or not cell.fill.fill_type:
@@ -64,6 +63,13 @@ def safe_copy_fill(cell):
     except:
         return None
 
+# --- Highlight Sold-To rows in UI ---
+def highlight_soldto(row, acc_idx):
+    val = row.iloc[acc_idx]
+    if val and str(val).strip().lower() == "sold to":
+        return ["background-color: #FFF59D"] * len(row)  # light yellow
+    return [""] * len(row)
+
 
 if uploaded_files:
     if len(uploaded_files) > 50:
@@ -73,8 +79,6 @@ if uploaded_files:
 
             output_rows = []
             summary = []
-            headers = None
-            acc_idx = None
 
             for file in uploaded_files:
 
@@ -95,7 +99,6 @@ if uploaded_files:
 
                 normalized_headers = [normalize(h) for h in raw_headers]
 
-                # ✅ Robust AccountGroup detection
                 if "accountgroup" not in normalized_headers:
                     st.warning(f"⚠️ {file.name} skipped (missing AccountGroup column)")
                     continue
@@ -129,7 +132,7 @@ if uploaded_files:
 
                     if sold_to_count > 1:
                         flagged_groups += 1
-                        output_rows.append((file.name, group))
+                        output_rows.append((file.name, group, headers, acc_idx))
 
                 summary.append((file.name, total_groups, flagged_groups))
 
@@ -139,26 +142,31 @@ if uploaded_files:
 
                 group_counter = {}
 
-                for file_name, group in output_rows:
+                for file_name, group, headers, acc_idx in output_rows:
 
                     group_counter[file_name] = group_counter.get(file_name, 0) + 1
                     group_num = group_counter[file_name]
 
                     with st.expander(f"📁 {file_name} — Group {group_num}"):
 
-                        group_data = []
-                        for row in group:
-                            group_data.append([cell.value for cell in row])
+                        group_data = [[cell.value for cell in row] for row in group]
 
-                        group_df = pd.DataFrame(group_data, columns=headers)
+                        df = pd.DataFrame(group_data, columns=headers)
 
-                        # ✅ FIXED width param
-                        st.dataframe(group_df, width="stretch")
-
-                        sold_to_count = sum(
-                            1 for r in group
-                            if r[acc_idx].value and str(r[acc_idx].value).strip().lower() == "sold to"
+                        # ✅ Highlight Sold-To rows
+                        styled_df = df.style.apply(
+                            lambda row: highlight_soldto(row, acc_idx),
+                            axis=1
                         )
+
+                        st.dataframe(styled_df, width="stretch")
+
+                        sold_to_count = (df.iloc[:, acc_idx]
+                                         .astype(str)
+                                         .str.strip()
+                                         .str.lower()
+                                         .eq("sold to")
+                                         .sum())
 
                         st.markdown(f"**✅ Sold To Count: {sold_to_count}**")
 
@@ -172,9 +180,11 @@ if uploaded_files:
                 out_ws = out_wb.active
                 out_ws.title = "Flagged Groups"
 
-                out_ws.append(["Source File"] + headers)
+                # Use headers from first valid group
+                first_headers = output_rows[0][2]
+                out_ws.append(["Source File"] + first_headers)
 
-                for file_name, group in output_rows:
+                for file_name, group, headers, acc_idx in output_rows:
 
                     out_ws.append([f"--- {file_name} ---"] + [""] * len(headers))
 
@@ -212,3 +222,4 @@ if uploaded_files:
             st.subheader("📋 Summary")
             for name, total, flagged in summary:
                 st.write(f"**{name}** → Groups Reviewed: {total}, Flagged: {flagged}")
+``
