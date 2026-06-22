@@ -21,11 +21,33 @@ def normalize(col):
         return ""
     return str(col).strip().lower().replace(" ", "").replace("_", "")
 
+# --- Create safe, unique headers ---
+def clean_headers(headers):
+    cleaned = []
+    seen = {}
+
+    for i, h in enumerate(headers):
+        if h is None or str(h).strip() == "":
+            h = f"Column_{i+1}"
+        else:
+            h = str(h).strip()
+
+        # Ensure uniqueness
+        if h in seen:
+            seen[h] += 1
+            h = f"{h}_{seen[h]}"
+        else:
+            seen[h] = 0
+
+        cleaned.append(h)
+
+    return cleaned
+
 # --- Detect highlighted rows ---
 def is_highlighted(row):
     return any(cell.fill and cell.fill.fill_type for cell in row)
 
-# --- SAFE fill copy (fixes crash) ---
+# --- Safe fill copy ---
 def safe_copy_fill(cell):
     try:
         if not cell.fill or not cell.fill.fill_type:
@@ -34,12 +56,9 @@ def safe_copy_fill(cell):
         start = cell.fill.start_color
         end = cell.fill.end_color
 
-        start_color = start.rgb if start and start.rgb else None
-        end_color = end.rgb if end and end.rgb else None
-
         return PatternFill(
-            start_color=start_color,
-            end_color=end_color,
+            start_color=start.rgb if start and start.rgb else None,
+            end_color=end.rgb if end and end.rgb else None,
             fill_type=cell.fill.fill_type
         )
     except:
@@ -55,6 +74,7 @@ if uploaded_files:
             output_rows = []
             summary = []
             headers = None
+            acc_idx = None
 
             for file in uploaded_files:
 
@@ -70,12 +90,12 @@ if uploaded_files:
                 if not rows:
                     continue
 
-                headers_raw = [cell.value for cell in rows[0]]
-                headers = headers_raw
+                raw_headers = [cell.value for cell in rows[0]]
+                headers = clean_headers(raw_headers)
 
-                normalized_headers = [normalize(h) for h in headers_raw]
+                normalized_headers = [normalize(h) for h in raw_headers]
 
-                # ✅ FIXED AccountGroup detection
+                # ✅ Robust AccountGroup detection
                 if "accountgroup" not in normalized_headers:
                     st.warning(f"⚠️ {file.name} skipped (missing AccountGroup column)")
                     continue
@@ -85,9 +105,7 @@ if uploaded_files:
                 groups = []
                 current_group = []
 
-                # --- Identify highlighted groups ---
                 for row in rows[1:]:
-
                     if is_highlighted(row):
                         current_group.append(row)
                     else:
@@ -101,7 +119,6 @@ if uploaded_files:
                 total_groups = len(groups)
                 flagged_groups = 0
 
-                # --- Apply Sold To rule ---
                 for group in groups:
                     sold_to_count = 0
 
@@ -116,7 +133,7 @@ if uploaded_files:
 
                 summary.append((file.name, total_groups, flagged_groups))
 
-            # ✅ GROUPED PREVIEW PANEL
+            # ✅ GROUPED PREVIEW
             if output_rows:
                 st.subheader("🔍 Preview of Flagged Duplicate Groups")
 
@@ -124,23 +141,20 @@ if uploaded_files:
 
                 for file_name, group in output_rows:
 
-                    if file_name not in group_counter:
-                        group_counter[file_name] = 1
-                    else:
-                        group_counter[file_name] += 1
-
+                    group_counter[file_name] = group_counter.get(file_name, 0) + 1
                     group_num = group_counter[file_name]
 
-                    with st.expander(f"📁 {file_name} — Group {group_num}", expanded=False):
+                    with st.expander(f"📁 {file_name} — Group {group_num}"):
 
                         group_data = []
                         for row in group:
                             group_data.append([cell.value for cell in row])
 
                         group_df = pd.DataFrame(group_data, columns=headers)
-                        st.dataframe(group_df, use_container_width=True)
 
-                        # ✅ Sold To count display
+                        # ✅ FIXED width param
+                        st.dataframe(group_df, width="stretch")
+
                         sold_to_count = sum(
                             1 for r in group
                             if r[acc_idx].value and str(r[acc_idx].value).strip().lower() == "sold to"
@@ -151,7 +165,7 @@ if uploaded_files:
             else:
                 st.info("No duplicate groups found with multiple 'Sold To' rows.")
 
-            # ✅ EXPORT OUTPUT
+            # ✅ EXPORT
             if output_rows:
 
                 out_wb = Workbook()
@@ -168,7 +182,6 @@ if uploaded_files:
                         values = [cell.value for cell in row]
                         out_ws.append([file_name] + values)
 
-                        # ✅ SAFE highlight copy
                         for col_idx, cell in enumerate(row):
                             out_cell = out_ws.cell(
                                 row=out_ws.max_row,
