@@ -1,5 +1,6 @@
 import streamlit as st
 from openpyxl import load_workbook, Workbook
+from openpyxl.styles import PatternFill
 import io
 
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
@@ -17,6 +18,30 @@ def is_highlighted(row):
     # ANY filled cell → counts as highlighted
     return any(cell.fill and cell.fill.fill_type for cell in row)
 
+def safe_copy_fill(cell):
+    """
+    Safely recreate a fill (avoids StyleProxy crash)
+    """
+    try:
+        if not cell.fill or not cell.fill.fill_type:
+            return None
+
+        # Handle RGB colors safely
+        start = cell.fill.start_color
+        end = cell.fill.end_color
+
+        start_color = start.rgb if start.rgb else None
+        end_color = end.rgb if end.rgb else None
+
+        return PatternFill(
+            start_color=start_color,
+            end_color=end_color,
+            fill_type=cell.fill.fill_type
+        )
+    except:
+        return None
+
+
 if uploaded_files:
     if len(uploaded_files) > 50:
         st.error("⚠️ Please upload 50 files or fewer.")
@@ -25,15 +50,21 @@ if uploaded_files:
 
             output_rows = []
             summary = []
-            headers_written = False
             headers = None
 
             for file in uploaded_files:
 
-                wb = load_workbook(file, data_only=True)
-                ws = wb.active
+                try:
+                    wb = load_workbook(file, data_only=True)
+                    ws = wb.active
+                except:
+                    st.warning(f"⚠️ Could not read {file.name}")
+                    continue
 
                 rows = list(ws.iter_rows())
+
+                if not rows:
+                    continue
 
                 headers = [cell.value for cell in rows[0]]
 
@@ -68,8 +99,8 @@ if uploaded_files:
                     sold_to_count = 0
 
                     for row in group:
-                        value = str(row[acc_idx].value).strip().lower()
-                        if value == "sold to":
+                        val = row[acc_idx].value
+                        if val and str(val).strip().lower() == "sold to":
                             sold_to_count += 1
 
                     if sold_to_count > 1:
@@ -83,28 +114,33 @@ if uploaded_files:
 
                 out_wb = Workbook()
                 out_ws = out_wb.active
-
                 out_ws.title = "Flagged Groups"
 
-                # Write headers once
+                # Write headers
                 out_ws.append(["Source File"] + headers)
 
                 for file_name, group in output_rows:
 
-                    # Optional separator row for readability
-                    out_ws.append([f"--- {file_name} ---"] + [""] * (len(headers)))
+                    # separator row
+                    out_ws.append([f"--- {file_name} ---"] + [""] * len(headers))
 
                     for row in group:
                         values = [cell.value for cell in row]
                         out_ws.append([file_name] + values)
 
-                        # Preserve highlights
+                        # ✅ SAFE highlight copy (NO CRASH)
                         for col_idx, cell in enumerate(row):
                             out_cell = out_ws.cell(
                                 row=out_ws.max_row,
                                 column=col_idx + 2
                             )
-                            out_cell.fill = cell.fill
+
+                            fill = safe_copy_fill(cell)
+                            if fill:
+                                try:
+                                    out_cell.fill = fill
+                                except:
+                                    pass
 
                 buffer = io.BytesIO()
                 out_wb.save(buffer)
