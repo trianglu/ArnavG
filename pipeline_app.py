@@ -224,43 +224,43 @@ def build_file(df):
 if uploaded_file:
     st.success("✅ File uploaded")
 
-   def safe_read_excel(file):
-       try:
-           df = pd.read_excel(file, skiprows=4, engine="openpyxl")
-       except Exception:
-           file.seek(0)
-           df = pd.read_excel(file, header=None, engine="openpyxl")
-       
-       # force columns to strings
-       df.columns = df.columns.astype(str)
-       return df
+def safe_read_excel(file):
+   try:
+       df = pd.read_excel(file, skiprows=4, engine="openpyxl")
+   except Exception:
+       file.seek(0)
+       df = pd.read_excel(file, header=None, engine="openpyxl")
    
-    df_raw = safe_read_excel(uploaded_file)
+   # force columns to strings
+   df.columns = df.columns.astype(str)
+   return df
 
-    st.write("Preview:")
-    st.dataframe(df_raw.head())
+df_raw = safe_read_excel(uploaded_file)
 
-    if st.button("🚀 Run Pipeline"):
-        with st.spinner("Processing..."):
-            result = run_pipeline(df_raw)
+st.write("Preview:")
+st.dataframe(df_raw.head())
 
-            excel_file = build_file(result)
+if st.button("🚀 Run Pipeline"):
+    with st.spinner("Processing..."):
+        result = run_pipeline(df_raw)
 
-        st.success("✅ Pipeline Complete!")
+        excel_file = build_file(result)
 
-    # Detect state name
-    if "State" in result.columns:
-        state_name = result["State"].dropna().mode()[0]  # most frequent state
-    else:
-        state_name = "output"
-    
-    # Clean state name (safe filename)
-    state_name_clean = str(state_name).strip().replace(" ", "_")
-    
-    file_name = f"{state_name_clean}_final_processed.xlsx"
-    
-    st.download_button(
-        "⬇ Download Output",
-        excel_file.getvalue(),
-        file_name=file_name
-    )
+    st.success("✅ Pipeline Complete!")
+
+# Detect state name
+if "State" in result.columns:
+    state_name = result["State"].dropna().mode()[0]  # most frequent state
+else:
+    state_name = "output"
+
+# Clean state name (safe filename)
+state_name_clean = str(state_name).strip().replace(" ", "_")
+
+file_name = f"{state_name_clean}_final_processed.xlsx"
+
+st.download_button(
+    "⬇ Download Output",
+    excel_file.getvalue(),
+    file_name=file_name
+)
