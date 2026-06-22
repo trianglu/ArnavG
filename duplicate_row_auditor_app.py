@@ -169,18 +169,38 @@ if st.session_state.results:
 
             st.markdown(f"**✅ Sold To Count: {sold_to_count}**")
 
-    # ✅ EXPORT ALWAYS VISIBLE
+    # ✅ EXPORT WITH MULTIPLE SHEETS
     st.divider()
     st.subheader("📥 Export Results")
-
+    
     if st.button("Generate Excel File"):
-
+    
+        from openpyxl import Workbook
+    
         out_wb = Workbook()
-        out_ws = out_wb.active
-
-        first_headers = all_results[0][2]
-        out_ws.append(["Source File"] + first_headers)
-
+    
+        # Remove default sheet
+        default_sheet = out_wb.active
+        out_wb.remove(default_sheet)
+    
+        # Create 3 sheets
+        sheet_groups = {
+            "2+ Sold To": [],
+            "1 Sold To": [],
+            "0 Sold To": []
+        }
+    
+        # ✅ Categorize groups
+        for file_name, group, headers, acc_idx, sold_to_count in all_results:
+    
+            if sold_to_count >= 2:
+                sheet_groups["2+ Sold To"].append((file_name, group))
+            elif sold_to_count == 1:
+                sheet_groups["1 Sold To"].append((file_name, group))
+            else:
+                sheet_groups["0 Sold To"].append((file_name, group))
+    
+        # ✅ Safe fill copy
         def safe_copy_fill(cell):
             try:
                 if not cell.fill or not cell.fill.fill_type:
@@ -192,35 +212,50 @@ if st.session_state.results:
                 )
             except:
                 return None
-
-        # ✅ EXPORT EXACT GROUPS (unaltered)
-        for file_name, group, headers, acc_idx, sold_to_count in all_results:
-
-            out_ws.append([f"--- {file_name} ---"] + [""] * len(headers))
-
-            for row in group:
-                values = [cell.value for cell in row]
-                out_ws.append([file_name] + values)
-
-                for col_idx, cell in enumerate(row):
-                    out_cell = out_ws.cell(
-                        row=out_ws.max_row,
-                        column=col_idx + 2
-                    )
-
-                    fill = safe_copy_fill(cell)
-                    if fill:
-                        try:
-                            out_cell.fill = fill
-                        except:
-                            pass
-
+    
+        # ✅ Build each sheet
+        for sheet_name, groups in sheet_groups.items():
+    
+            ws = out_wb.create_sheet(title=sheet_name)
+    
+            if not groups:
+                ws.append(["No data found"])
+                continue
+    
+            # Use headers from first group
+            first_headers = headers
+            ws.append(["Source File"] + first_headers)
+    
+            for file_name, group in groups:
+    
+                # separator row
+                ws.append([f"--- {file_name} ---"] + [""] * len(first_headers))
+    
+                for row in group:
+                    values = [cell.value for cell in row]
+                    ws.append([file_name] + values)
+    
+                    # preserve highlight colors
+                    for col_idx, cell in enumerate(row):
+                        out_cell = ws.cell(
+                            row=ws.max_row,
+                            column=col_idx + 2
+                        )
+    
+                        fill = safe_copy_fill(cell)
+                        if fill:
+                            try:
+                                out_cell.fill = fill
+                            except:
+                                pass
+    
+        # ✅ Save + Download
         buffer = io.BytesIO()
         out_wb.save(buffer)
         buffer.seek(0)
-
+    
         st.download_button(
-            "Download Multiple Sold To Duplicates.xlsx",
+            "Download Multi-Sheet Duplicate Audit.xlsx",
             buffer,
             file_name="Multiple Sold To Duplicates.xlsx"
         )
