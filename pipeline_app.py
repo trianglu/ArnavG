@@ -6,6 +6,17 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from rapidfuzz import fuzz
 
+def safe_read_excel(file):
+   try:
+       df = pd.read_excel(file, skiprows=4, engine="openpyxl")
+   except Exception:
+       file.seek(0)
+       df = pd.read_excel(file, header=None, engine="openpyxl")
+   
+   # force columns to strings
+   df.columns = df.columns.astype(str)
+   return df
+
 # ------------------ UI CONFIG ------------------
 st.set_page_config(page_title="Dedup Pipeline Tool", layout="wide")
 
@@ -43,16 +54,6 @@ def fuzzy_match(row1, row2):
     return name_score >= 90 and addr_score >= 90
 
 # ------------------ PIPELINE ------------------
-# Normalize column names
-df_raw.columns = [str(col).strip() for col in df_raw.columns]
-
-# Try to auto-detect key columns
-def find_column(possible_names):
-    for col in df_raw.columns:
-        if any(name.lower() in col.lower() for name in possible_names):
-            return col
-    return None
-
 name_col = find_column(["name"])
 address_col = find_column(["address"])
 state_col = find_column(["state"])
@@ -221,10 +222,7 @@ def build_file(df):
     return output
 
 # ------------------ RUN ------------------
-uploaded_file = st.file_uploader("📂 Upload Excel file", type=["xlsx"])
-
 if uploaded_file:
-
     st.success("✅ File uploaded")
 
     # ✅ Step 1: Read file FIRST
@@ -274,44 +272,3 @@ if uploaded_file:
             excel_file.getvalue(),
             file_name=file_name
         )
-
-def safe_read_excel(file):
-   try:
-       df = pd.read_excel(file, skiprows=4, engine="openpyxl")
-   except Exception:
-       file.seek(0)
-       df = pd.read_excel(file, header=None, engine="openpyxl")
-   
-   # force columns to strings
-   df.columns = df.columns.astype(str)
-   return df
-
-df_raw = safe_read_excel(uploaded_file)
-
-st.write("Preview:")
-st.dataframe(df_raw.head())
-
-if st.button("🚀 Run Pipeline"):
-    with st.spinner("Processing..."):
-        result = run_pipeline(df_raw)
-
-        excel_file = build_file(result)
-
-    st.success("✅ Pipeline Complete!")
-
-# Detect state name
-if "State" in result.columns:
-    state_name = result["State"].dropna().mode()[0]  # most frequent state
-else:
-    state_name = "output"
-
-# Clean state name (safe filename)
-state_name_clean = str(state_name).strip().replace(" ", "_")
-
-file_name = f"{state_name_clean}_final_processed.xlsx"
-
-st.download_button(
-    "⬇ Download Output",
-    excel_file.getvalue(),
-    file_name=file_name
-)
