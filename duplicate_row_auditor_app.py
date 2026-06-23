@@ -3,6 +3,7 @@ from openpyxl import load_workbook, Workbook
 import io
 import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import copy  # ✅ IMPORTANT FIX
 
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 st.title("📊 Duplicate Row Auditor")
@@ -61,7 +62,6 @@ def process_single_file(file_dict):
     headers = [cell.value for cell in ws[1]]
     col_map = smart_column_map(headers)
 
-    # ✅ SAFE handling (no crash)
     if col_map["group_id"] is None or col_map["account_group"] is None:
         return headers, [], [], [], {
             "file": filename,
@@ -80,7 +80,7 @@ def process_single_file(file_dict):
 
     for row in ws.iter_rows(min_row=2):
 
-        # ✅ STRICT highlight-only filter
+        # ✅ Highlight-only filter
         if not is_highlighted(row):
             continue
 
@@ -92,10 +92,9 @@ def process_single_file(file_dict):
 
         groups[unique_group_key].append(row)
 
-    # ---- classify groups
     groups_0, groups_1, groups_2_plus = [], [], []
 
-    for group_key, rows in groups.items():
+    for rows in groups.values():
         sold_to_count = sum(
             1 for r in rows if is_sold_to(r[account_group_idx].value)
         )
@@ -119,7 +118,7 @@ def process_single_file(file_dict):
 
 
 # -------------------------------
-# ✅ MAIN ENGINE (PARALLEL)
+# ✅ MAIN ENGINE
 # -------------------------------
 
 @st.cache_data(show_spinner=False)
@@ -136,12 +135,12 @@ def process_files_parallel(file_dict_list):
 
     for h, g0, g1, g2, stats in results:
 
-        # ✅ handle failed files
         if stats.get("error"):
             error_files.append(stats)
             summary_stats.append(stats)
             continue
 
+        # ✅ Ensure headers always initialize
         if headers is None:
             headers = ["Source File"] + h
 
@@ -162,9 +161,9 @@ def process_files_parallel(file_dict_list):
 
         summary_stats.append(stats)
 
-    # -------------------------------
-    # ✅ BUILD OUTPUT
-    # -------------------------------
+    # ✅ fallback if ALL files failed
+    if headers is None:
+        headers = ["Source File"]
 
     out_wb = Workbook()
     out_wb.remove(out_wb.active)
@@ -189,8 +188,9 @@ def process_files_parallel(file_dict_list):
                         value=cell.value
                     )
 
-                    if cell.fill:
-                        new_cell.fill = cell.fill
+                    # ✅ FIXED STYLE COPY (THIS WAS YOUR CRASH)
+                    if cell.fill and cell.fill.fill_type:
+                        new_cell.fill = copy(cell.fill)
 
                 row_cursor += 1
 
@@ -200,18 +200,10 @@ def process_files_parallel(file_dict_list):
     write_sheet("1 SoldTo Accounts", all_1)
     write_sheet("2+ SoldTo Accounts", all_2)
 
-    # -------------------------------
-    # ✅ SUMMARY SHEET
-    # -------------------------------
-
     ws_summary = out_wb.create_sheet("Summary")
 
     ws_summary.append([
-        "File",
-        "Total Groups",
-        "0 SoldTo",
-        "1 SoldTo",
-        "2+ SoldTo"
+        "File", "Total Groups", "0 SoldTo", "1 SoldTo", "2+ SoldTo"
     ])
 
     for stat in summary_stats:
@@ -281,7 +273,6 @@ if uploaded_files:
         st.metric("Files Processed", stats["total_files"])
         st.caption(f"⏱ Processing Time: {stats['time']} seconds")
 
-        # ✅ SHOW ERRORS
         if stats["errors"]:
             st.warning("⚠️ Some files were skipped due to missing columns:")
 
