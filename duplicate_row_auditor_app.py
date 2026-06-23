@@ -23,28 +23,23 @@ def normalize(col):
     return str(col).strip().lower().replace(" ", "").replace("_", "")
 
 def smart_column_map(headers):
-    norm_headers = {normalize(h): i for i, h in enumerate(headers)}
+    normalized = [normalize(h) for h in headers]
 
-    def find_column(possible_names):
-        for name in possible_names:
-            if name in norm_headers:
-                return norm_headers[name]
+    def find_best(keywords):
+        for i, col in enumerate(normalized):
+            for k in keywords:
+                if k in col:
+                    return i
         return None
 
     return {
-        "group_id": find_column([
-            "groupid", "group_id", "group", "groupkey"
-        ]),
-        "account_group": find_column([
-            "accountgroup", "account_group", "type"
-        ])
+        "group_id": find_best(["groupid", "group", "groupkey"]),
+        "account_group": find_best(["accountgroup", "account", "type"])
     }
 
 def is_sold_to(val):
     return val and "sold to" in str(val).lower()
 
-
-# ✅ Detect highlighted row (STRICT audit mode)
 def is_highlighted(row):
     for cell in row:
         if cell.fill and cell.fill.fill_type is not None:
@@ -64,20 +59,28 @@ def process_single_file(file_dict):
     ws = wb.active
 
     headers = [cell.value for cell in ws[1]]
-
     col_map = smart_column_map(headers)
 
+    # ✅ SAFE handling (no crash)
     if col_map["group_id"] is None or col_map["account_group"] is None:
-        raise ValueError(f"Missing required columns in {filename}")
+        return headers, [], [], [], {
+            "file": filename,
+            "total_groups": 0,
+            "0": 0,
+            "1": 0,
+            "2plus": 0,
+            "error": True,
+            "columns": headers
+        }
 
     group_id_idx = col_map["group_id"]
     account_group_idx = col_map["account_group"]
 
     groups = {}
 
-    # ✅ ONLY process highlighted rows
     for row in ws.iter_rows(min_row=2):
 
+        # ✅ STRICT highlight-only filter
         if not is_highlighted(row):
             continue
 
@@ -116,7 +119,7 @@ def process_single_file(file_dict):
 
 
 # -------------------------------
-# ✅ MAIN PARALLEL ENGINE
+# ✅ MAIN ENGINE (PARALLEL)
 # -------------------------------
 
 @st.cache_data(show_spinner=False)
@@ -126,12 +129,18 @@ def process_files_parallel(file_dict_list):
     all_0, all_1, all_2 = [], [], []
     summary_stats = []
     headers = None
+    error_files = []
 
-    # ✅ PARALLEL PROCESSING
     with ThreadPoolExecutor() as executor:
         results = list(executor.map(process_single_file, file_dict_list))
 
     for h, g0, g1, g2, stats in results:
+
+        # ✅ handle failed files
+        if stats.get("error"):
+            error_files.append(stats)
+            summary_stats.append(stats)
+            continue
 
         if headers is None:
             headers = ["Source File"] + h
@@ -154,7 +163,7 @@ def process_files_parallel(file_dict_list):
         summary_stats.append(stats)
 
     # -------------------------------
-    # ✅ BUILD OUTPUT WORKBOOK
+    # ✅ BUILD OUTPUT
     # -------------------------------
 
     out_wb = Workbook()
@@ -163,7 +172,6 @@ def process_files_parallel(file_dict_list):
     def write_sheet(name, grouped_rows):
         ws_out = out_wb.create_sheet(name)
 
-        # write headers
         for col_idx, header in enumerate(headers, start=1):
             ws_out.cell(row=1, column=col_idx, value=header)
 
@@ -181,7 +189,6 @@ def process_files_parallel(file_dict_list):
                         value=cell.value
                     )
 
-                    # ✅ PRESERVE COLORS
                     if cell.fill:
                         new_cell.fill = cell.fill
 
@@ -200,7 +207,11 @@ def process_files_parallel(file_dict_list):
     ws_summary = out_wb.create_sheet("Summary")
 
     ws_summary.append([
-        "File", "Total Groups", "0 SoldTo", "1 SoldTo", "2+ SoldTo"
+        "File",
+        "Total Groups",
+        "0 SoldTo",
+        "1 SoldTo",
+        "2+ SoldTo"
     ])
 
     for stat in summary_stats:
@@ -212,7 +223,6 @@ def process_files_parallel(file_dict_list):
             stat["2plus"]
         ])
 
-    # TOTAL ROW
     ws_summary.append([])
     ws_summary.append([
         "TOTAL",
@@ -222,10 +232,6 @@ def process_files_parallel(file_dict_list):
         sum(s["2plus"] for s in summary_stats),
     ])
 
-    # -------------------------------
-    # ✅ SAVE
-    # -------------------------------
-
     output = io.BytesIO()
     out_wb.save(output)
     output.seek(0)
@@ -234,14 +240,15 @@ def process_files_parallel(file_dict_list):
 
     stats = {
         "total_files": len(file_dict_list),
-        "time": round(end_time - start_time, 2)
+        "time": round(end_time - start_time, 2),
+        "errors": error_files
     }
 
     return output, stats
 
 
 # -------------------------------
-# ✅ STREAMLIT UI
+# ✅ UI
 # -------------------------------
 
 if uploaded_files:
@@ -254,7 +261,6 @@ if uploaded_files:
         file_dict_list = []
         total_files = len(uploaded_files)
 
-        # STEP 1: Load files
         for i, file in enumerate(uploaded_files):
             status_text.text(f"Loading {file.name}...")
             file_dict_list.append({
@@ -263,21 +269,25 @@ if uploaded_files:
             })
             progress_bar.progress((i + 1) / total_files * 0.4)
 
-        # STEP 2: Process
-        status_text.text("Processing highlighted duplicate groups (parallel)...")
+        status_text.text("Processing highlighted duplicate groups...")
         output_file, stats = process_files_parallel(file_dict_list)
         progress_bar.progress(0.85)
 
-        # STEP 3: Finish
-        status_text.text("Finalizing Excel...")
+        status_text.text("Finalizing output...")
         progress_bar.progress(1.0)
 
         st.success("✅ Excel generated successfully!")
 
-        # Metrics
-        col1, col2 = st.columns(2)
-        col1.metric("Files Processed", stats["total_files"])
-        col2.metric("Processing Time (sec)", stats["time"])
+        st.metric("Files Processed", stats["total_files"])
+        st.caption(f"⏱ Processing Time: {stats['time']} seconds")
+
+        # ✅ SHOW ERRORS
+        if stats["errors"]:
+            st.warning("⚠️ Some files were skipped due to missing columns:")
+
+            for err in stats["errors"]:
+                st.write(f"❌ {err['file']}")
+                st.write(f"Columns found: {err['columns']}")
 
         st.download_button(
             label="⬇️ Download Merged Excel",
