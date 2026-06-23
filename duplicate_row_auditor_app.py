@@ -13,10 +13,49 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+# -------------------------------
+# ✅ HELPERS
+# -------------------------------
+
+def normalize(col):
+    if not col:
+        return ""
+    return str(col).strip().lower().replace(" ", "").replace("_", "")
+
+def smart_column_map(headers):
+    norm_headers = {normalize(h): i for i, h in enumerate(headers)}
+
+    def find_column(possible_names):
+        for name in possible_names:
+            if name in norm_headers:
+                return norm_headers[name]
+        return None
+
+    return {
+        "group_id": find_column([
+            "groupid", "group_id", "group", "groupkey"
+        ]),
+        "account_group": find_column([
+            "accountgroup", "account_group", "type"
+        ])
+    }
+
 def is_sold_to(val):
     return val and "sold to" in str(val).lower()
 
-# ---- FILE PROCESSING (SINGLE FILE)
+
+# ✅ Detect highlighted row (STRICT audit mode)
+def is_highlighted(row):
+    for cell in row:
+        if cell.fill and cell.fill.fill_type is not None:
+            return True
+    return False
+
+
+# -------------------------------
+# ✅ SINGLE FILE PROCESSING
+# -------------------------------
+
 def process_single_file(file_dict):
     file_bytes = file_dict["bytes"]
     filename = file_dict["name"]
@@ -26,12 +65,22 @@ def process_single_file(file_dict):
 
     headers = [cell.value for cell in ws[1]]
 
-    group_id_idx = headers.index("group_id")
-    account_group_idx = headers.index("AccountGroup")
+    col_map = smart_column_map(headers)
+
+    if col_map["group_id"] is None or col_map["account_group"] is None:
+        raise ValueError(f"Missing required columns in {filename}")
+
+    group_id_idx = col_map["group_id"]
+    account_group_idx = col_map["account_group"]
 
     groups = {}
 
+    # ✅ ONLY process highlighted rows
     for row in ws.iter_rows(min_row=2):
+
+        if not is_highlighted(row):
+            continue
+
         group_id = row[group_id_idx].value
         unique_group_key = f"{filename}__{group_id}"
 
@@ -40,7 +89,7 @@ def process_single_file(file_dict):
 
         groups[unique_group_key].append(row)
 
-    # ---- classify
+    # ---- classify groups
     groups_0, groups_1, groups_2_plus = [], [], []
 
     for group_key, rows in groups.items():
@@ -66,7 +115,10 @@ def process_single_file(file_dict):
     return headers, groups_0, groups_1, groups_2_plus, stats
 
 
-# ---- MAIN ENGINE
+# -------------------------------
+# ✅ MAIN PARALLEL ENGINE
+# -------------------------------
+
 @st.cache_data(show_spinner=False)
 def process_files_parallel(file_dict_list):
     start_time = time.time()
@@ -75,15 +127,15 @@ def process_files_parallel(file_dict_list):
     summary_stats = []
     headers = None
 
-    # 🔥 PARALLEL EXECUTION
+    # ✅ PARALLEL PROCESSING
     with ThreadPoolExecutor() as executor:
         results = list(executor.map(process_single_file, file_dict_list))
 
     for h, g0, g1, g2, stats in results:
+
         if headers is None:
             headers = ["Source File"] + h
 
-        # attach file name
         filename = stats["file"]
 
         def attach_source(groups):
@@ -101,14 +153,17 @@ def process_files_parallel(file_dict_list):
 
         summary_stats.append(stats)
 
-    # ---- BUILD WORKBOOK
+    # -------------------------------
+    # ✅ BUILD OUTPUT WORKBOOK
+    # -------------------------------
+
     out_wb = Workbook()
     out_wb.remove(out_wb.active)
 
     def write_sheet(name, grouped_rows):
         ws_out = out_wb.create_sheet(name)
 
-        # headers
+        # write headers
         for col_idx, header in enumerate(headers, start=1):
             ws_out.cell(row=1, column=col_idx, value=header)
 
@@ -116,7 +171,7 @@ def process_files_parallel(file_dict_list):
 
         for group in grouped_rows:
             for (filename, row) in group:
-                # write source file column
+
                 ws_out.cell(row=row_cursor, column=1, value=filename)
 
                 for col_idx, cell in enumerate(row, start=2):
@@ -126,26 +181,26 @@ def process_files_parallel(file_dict_list):
                         value=cell.value
                     )
 
+                    # ✅ PRESERVE COLORS
                     if cell.fill:
                         new_cell.fill = cell.fill
 
                 row_cursor += 1
 
-            row_cursor += 1  # spacing
+            row_cursor += 1
 
     write_sheet("0 SoldTo Accounts", all_0)
     write_sheet("1 SoldTo Accounts", all_1)
     write_sheet("2+ SoldTo Accounts", all_2)
 
-    # ---- SUMMARY SHEET
+    # -------------------------------
+    # ✅ SUMMARY SHEET
+    # -------------------------------
+
     ws_summary = out_wb.create_sheet("Summary")
 
     ws_summary.append([
-        "File",
-        "Total Groups",
-        "0 SoldTo",
-        "1 SoldTo",
-        "2+ SoldTo"
+        "File", "Total Groups", "0 SoldTo", "1 SoldTo", "2+ SoldTo"
     ])
 
     for stat in summary_stats:
@@ -157,7 +212,7 @@ def process_files_parallel(file_dict_list):
             stat["2plus"]
         ])
 
-    # totals row
+    # TOTAL ROW
     ws_summary.append([])
     ws_summary.append([
         "TOTAL",
@@ -167,7 +222,10 @@ def process_files_parallel(file_dict_list):
         sum(s["2plus"] for s in summary_stats),
     ])
 
-    # ---- SAVE
+    # -------------------------------
+    # ✅ SAVE
+    # -------------------------------
+
     output = io.BytesIO()
     out_wb.save(output)
     output.seek(0)
@@ -182,7 +240,10 @@ def process_files_parallel(file_dict_list):
     return output, stats
 
 
-# ---- UI
+# -------------------------------
+# ✅ STREAMLIT UI
+# -------------------------------
+
 if uploaded_files:
 
     if st.button("⚡ Generate Merged Excel"):
@@ -191,7 +252,6 @@ if uploaded_files:
         status_text = st.empty()
 
         file_dict_list = []
-
         total_files = len(uploaded_files)
 
         # STEP 1: Load files
@@ -204,18 +264,20 @@ if uploaded_files:
             progress_bar.progress((i + 1) / total_files * 0.4)
 
         # STEP 2: Process
-        status_text.text("Processing files (parallel)...")
+        status_text.text("Processing highlighted duplicate groups (parallel)...")
         output_file, stats = process_files_parallel(file_dict_list)
         progress_bar.progress(0.85)
 
         # STEP 3: Finish
-        status_text.text("Finalizing output...")
+        status_text.text("Finalizing Excel...")
         progress_bar.progress(1.0)
 
         st.success("✅ Excel generated successfully!")
 
-        st.metric("Files Processed", stats["total_files"])
-        st.caption(f"⏱ Processing Time: {stats['time']} seconds")
+        # Metrics
+        col1, col2 = st.columns(2)
+        col1.metric("Files Processed", stats["total_files"])
+        col2.metric("Processing Time (sec)", stats["time"])
 
         st.download_button(
             label="⬇️ Download Merged Excel",
