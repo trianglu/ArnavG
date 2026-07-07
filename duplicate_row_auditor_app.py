@@ -2,6 +2,7 @@ import streamlit as st
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import PatternFill
 import io
+import time
 
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 st.title("📊 Duplicate Row Auditor")
@@ -20,7 +21,12 @@ def normalize(col):
     if not col:
         return ""
     return (
-        str(col).strip().lower().replace(" ", "").replace("_", "").replace("\xa0", "")
+        str(col)
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("\xa0", "")
     )
 
 def smart_column_map(headers):
@@ -35,7 +41,8 @@ def smart_column_map(headers):
 
     return {
         "group_id": find_best(["groupid", "group"]),
-        "account_group": find_best(["accountgroup"])
+        "account_group": find_best(["accountgroup"]),
+        "external_id": find_best(["externalid", "external", "extid", "id"])
     }
 
 def is_sold_to(val):
@@ -56,9 +63,14 @@ def safe_copy_fill(cell):
     except:
         return None
 
+# 🎨 Rainbow palette
+COLOR_PALETTE = [
+    "FFCCCC", "CCE5FF", "D5F5E3", "FFF2CC",
+    "E8DAEF", "FADBD8", "D6EAF8", "FCF3CF"
+]
 
 # -------------------------------
-# ✅ MAIN PROCESS
+# ✅ PROCESS FILES
 # -------------------------------
 
 def process_files(file_dict_list):
@@ -92,10 +104,12 @@ def process_files(file_dict_list):
 
         group_idx = col_map["group_id"]
         acc_idx = col_map["account_group"]
+        ext_idx = col_map["external_id"]
 
         groups = {}
 
         for row in ws.iter_rows(min_row=2):
+
             if not is_highlighted(row):
                 continue
 
@@ -140,25 +154,34 @@ if uploaded_files:
     if st.button("⚡ Generate Merged Excel"):
 
         progress_bar = st.progress(0)
+        status_text = st.empty()
+
         file_dict_list = []
+        total_files = len(uploaded_files)
 
         for i, file in enumerate(uploaded_files):
+            status_text.text(f"Loading {file.name}...")
             file_dict_list.append({
                 "name": file.name,
                 "bytes": file.getvalue()
             })
-            progress_bar.progress((i + 1) / len(uploaded_files) * 0.3)
+            progress_bar.progress((i + 1) / total_files * 0.3)
+
+        status_text.text("Processing duplicate groups...")
 
         headers, all_0, all_1, all_2, summary, errors = process_files(file_dict_list)
+
+        progress_bar.progress(0.8)
+
+        # -------------------------------
+        # ✅ EXPORT
+        # -------------------------------
 
         wb = Workbook()
         wb.remove(wb.active)
 
-        # ✅ COLOR DEFINITIONS
-        red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
-        yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+        def write_sheet(name, groups):
 
-        def write_sheet(name, groups, severity_fill):
             ws = wb.create_sheet(name)
 
             if headers:
@@ -169,44 +192,71 @@ if uploaded_files:
 
             for group in groups:
 
+                # ✅ Build External ID rainbow map
+                ext_map = {}
+                color_index = 0
+
+                for (filename, row) in group:
+                    if len(row) == 0:
+                        continue
+
+                    if ext_idx := next(
+                        (i for i, h in enumerate(headers[1:]) if "external" in normalize(h)), 
+                        None
+                    ):
+                        ext_value = row[ext_idx].value
+                        if ext_value and ext_value not in ext_map:
+                            ext_map[ext_value] = COLOR_PALETTE[color_index % len(COLOR_PALETTE)]
+                            color_index += 1
+
                 for filename, row in group:
 
                     ws.cell(row_cursor, 1, filename)
 
+                    ext_value = None
+                    if ext_idx is not None:
+                        ext_value = row[ext_idx].value
+
+                    row_color = ext_map.get(ext_value)
+
                     for j, cell in enumerate(row, start=2):
+
                         new_cell = ws.cell(row_cursor, j, cell.value)
 
-                        # ✅ ORIGINAL HIGHLIGHT PRESERVED
-                        original_fill = safe_copy_fill(cell)
-                        if original_fill:
-                            new_cell.fill = original_fill
+                        # preserve original highlight
+                        base_fill = safe_copy_fill(cell)
+                        if base_fill:
+                            new_cell.fill = base_fill
 
-                        # ✅ OVERLAY WITH SEVERITY COLOR
-                        if severity_fill:
-                            new_cell.fill = severity_fill
+                        # apply rainbow color
+                        if row_color:
+                            new_cell.fill = PatternFill(
+                                start_color=row_color,
+                                end_color=row_color,
+                                fill_type="solid"
+                            )
 
                     row_cursor += 1
 
                 row_cursor += 1
 
-        write_sheet("2+ SoldTo Accounts", all_2, red_fill)
-        write_sheet("1 SoldTo Accounts", all_1, yellow_fill)
-        write_sheet("0 SoldTo Accounts", all_0, None)
+        write_sheet("2+ SoldTo Accounts", all_2)
+        write_sheet("1 SoldTo Accounts", all_1)
+        write_sheet("0 SoldTo Accounts", all_0)
 
-        # ✅ SUMMARY
+        # ✅ Summary sheet
         ws_summary = wb.create_sheet("Summary")
         ws_summary.append(["File", "Total Groups", "0", "1", "2+"])
 
         for s in summary:
-            ws_summary.append([
-                s["file"], s["total"], s["0"], s["1"], s["2"]
-            ])
+            ws_summary.append([s["file"], s["total"], s["0"], s["1"], s["2"]])
 
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
 
         progress_bar.progress(1.0)
+        status_text.text("✅ Complete!")
 
         if errors:
             st.warning("⚠️ Some files skipped:")
