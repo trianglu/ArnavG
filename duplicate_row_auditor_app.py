@@ -1,9 +1,7 @@
 import streamlit as st
 from openpyxl import load_workbook, Workbook
+from openpyxl.styles import PatternFill
 import io
-import time
-from concurrent.futures import ThreadPoolExecutor
-from copy import copy  # ✅ IMPORTANT FIX
 
 st.set_page_config(page_title="Duplicate Row Auditor", layout="wide")
 st.title("📊 Duplicate Row Auditor")
@@ -21,7 +19,9 @@ uploaded_files = st.file_uploader(
 def normalize(col):
     if not col:
         return ""
-    return str(col).strip().lower().replace(" ", "").replace("_", "")
+    return (
+        str(col).strip().lower().replace(" ", "").replace("_", "").replace("\xa0", "")
+    )
 
 def smart_column_map(headers):
     normalized = [normalize(h) for h in headers]
@@ -34,209 +34,101 @@ def smart_column_map(headers):
         return None
 
     return {
-        "group_id": find_best(["groupid", "group", "groupkey"]),
-        "account_group": find_best(["accountgroup", "account", "type"])
+        "group_id": find_best(["groupid", "group"]),
+        "account_group": find_best(["accountgroup"])
     }
 
 def is_sold_to(val):
     return val and "sold to" in str(val).lower()
 
 def is_highlighted(row):
-    for cell in row:
-        if cell.fill and cell.fill.fill_type is not None:
-            return True
-    return False
+    return any(cell.fill and cell.fill.fill_type for cell in row)
 
-
-# -------------------------------
-# ✅ SINGLE FILE PROCESSING
-# -------------------------------
-
-def process_single_file(file_dict):
-    file_bytes = file_dict["bytes"]
-    filename = file_dict["name"]
-
-    wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
-    ws = wb.active
-
-    headers = [cell.value for cell in ws[1]]
-    col_map = smart_column_map(headers)
-
-    if col_map["group_id"] is None or col_map["account_group"] is None:
-        return headers, [], [], [], {
-            "file": filename,
-            "total_groups": 0,
-            "0": 0,
-            "1": 0,
-            "2plus": 0,
-            "error": True,
-            "columns": headers
-        }
-
-    group_id_idx = col_map["group_id"]
-    account_group_idx = col_map["account_group"]
-
-    groups = {}
-
-    for row in ws.iter_rows(min_row=2):
-
-        # ✅ Highlight-only filter
-        if not is_highlighted(row):
-            continue
-
-        group_id = row[group_id_idx].value
-        unique_group_key = f"{filename}__{group_id}"
-
-        if unique_group_key not in groups:
-            groups[unique_group_key] = []
-
-        groups[unique_group_key].append(row)
-
-    groups_0, groups_1, groups_2_plus = [], [], []
-
-    for rows in groups.values():
-        sold_to_count = sum(
-            1 for r in rows if is_sold_to(r[account_group_idx].value)
+def safe_copy_fill(cell):
+    try:
+        if not cell.fill or not cell.fill.fill_type:
+            return None
+        return PatternFill(
+            start_color=cell.fill.start_color.rgb,
+            end_color=cell.fill.end_color.rgb,
+            fill_type=cell.fill.fill_type
         )
-
-        if sold_to_count == 0:
-            groups_0.append(rows)
-        elif sold_to_count == 1:
-            groups_1.append(rows)
-        else:
-            groups_2_plus.append(rows)
-
-    stats = {
-        "file": filename,
-        "total_groups": len(groups),
-        "0": len(groups_0),
-        "1": len(groups_1),
-        "2plus": len(groups_2_plus)
-    }
-
-    return headers, groups_0, groups_1, groups_2_plus, stats
+    except:
+        return None
 
 
 # -------------------------------
-# ✅ MAIN ENGINE
+# ✅ MAIN PROCESS
 # -------------------------------
 
-@st.cache_data(show_spinner=False)
-def process_files_parallel(file_dict_list):
-    start_time = time.time()
+def process_files(file_dict_list):
 
     all_0, all_1, all_2 = [], [], []
     summary_stats = []
-    headers = None
     error_files = []
+    headers = None
 
-    with ThreadPoolExecutor() as executor:
-        results = list(executor.map(process_single_file, file_dict_list))
+    for file_dict in file_dict_list:
 
-    for h, g0, g1, g2, stats in results:
+        filename = file_dict["name"]
+        file_bytes = file_dict["bytes"]
 
-        if stats.get("error"):
-            error_files.append(stats)
-            summary_stats.append(stats)
+        try:
+            wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+            ws = wb.active
+        except:
+            error_files.append(filename)
             continue
 
-        # ✅ Ensure headers always initialize
+        headers_raw = [cell.value for cell in ws[1]]
+        col_map = smart_column_map(headers_raw)
+
+        if col_map["group_id"] is None or col_map["account_group"] is None:
+            error_files.append(filename)
+            continue
+
         if headers is None:
-            headers = ["Source File"] + h
+            headers = ["Source File"] + headers_raw
 
-        filename = stats["file"]
+        group_idx = col_map["group_id"]
+        acc_idx = col_map["account_group"]
 
-        def attach_source(groups):
-            new_groups = []
-            for group in groups:
-                new_group = []
-                for row in group:
-                    new_group.append((filename, row))
-                new_groups.append(new_group)
-            return new_groups
+        groups = {}
 
-        all_0.extend(attach_source(g0))
-        all_1.extend(attach_source(g1))
-        all_2.extend(attach_source(g2))
+        for row in ws.iter_rows(min_row=2):
+            if not is_highlighted(row):
+                continue
 
-        summary_stats.append(stats)
+            key = f"{filename}__{row[group_idx].value}"
+            groups.setdefault(key, []).append(row)
 
-    # ✅ fallback if ALL files failed
-    if headers is None:
-        headers = ["Source File"]
+        g0 = g1 = g2 = 0
 
-    out_wb = Workbook()
-    out_wb.remove(out_wb.active)
+        for group_rows in groups.values():
 
-    def write_sheet(name, grouped_rows):
-        ws_out = out_wb.create_sheet(name)
+            sold_to_count = sum(
+                1 for r in group_rows if is_sold_to(r[acc_idx].value)
+            )
 
-        for col_idx, header in enumerate(headers, start=1):
-            ws_out.cell(row=1, column=col_idx, value=header)
+            if sold_to_count >= 2:
+                all_2.append([(filename, r) for r in group_rows])
+                g2 += 1
+            elif sold_to_count == 1:
+                all_1.append([(filename, r) for r in group_rows])
+                g1 += 1
+            else:
+                all_0.append([(filename, r) for r in group_rows])
+                g0 += 1
 
-        row_cursor = 2
+        summary_stats.append({
+            "file": filename,
+            "total": len(groups),
+            "0": g0,
+            "1": g1,
+            "2": g2
+        })
 
-        for group in grouped_rows:
-            for (filename, row) in group:
-
-                ws_out.cell(row=row_cursor, column=1, value=filename)
-
-                for col_idx, cell in enumerate(row, start=2):
-                    new_cell = ws_out.cell(
-                        row=row_cursor,
-                        column=col_idx,
-                        value=cell.value
-                    )
-
-                    # ✅ FIXED STYLE COPY (THIS WAS YOUR CRASH)
-                    if cell.fill and cell.fill.fill_type:
-                        new_cell.fill = copy(cell.fill)
-
-                row_cursor += 1
-
-            row_cursor += 1
-
-    write_sheet("0 SoldTo Accounts", all_0)
-    write_sheet("1 SoldTo Accounts", all_1)
-    write_sheet("2+ SoldTo Accounts", all_2)
-
-    ws_summary = out_wb.create_sheet("Summary")
-
-    ws_summary.append([
-        "File", "Total Groups", "0 SoldTo", "1 SoldTo", "2+ SoldTo"
-    ])
-
-    for stat in summary_stats:
-        ws_summary.append([
-            stat["file"],
-            stat["total_groups"],
-            stat["0"],
-            stat["1"],
-            stat["2plus"]
-        ])
-
-    ws_summary.append([])
-    ws_summary.append([
-        "TOTAL",
-        sum(s["total_groups"] for s in summary_stats),
-        sum(s["0"] for s in summary_stats),
-        sum(s["1"] for s in summary_stats),
-        sum(s["2plus"] for s in summary_stats),
-    ])
-
-    output = io.BytesIO()
-    out_wb.save(output)
-    output.seek(0)
-
-    end_time = time.time()
-
-    stats = {
-        "total_files": len(file_dict_list),
-        "time": round(end_time - start_time, 2),
-        "errors": error_files
-    }
-
-    return output, stats
+    return headers, all_0, all_1, all_2, summary_stats, error_files
 
 
 # -------------------------------
@@ -248,41 +140,83 @@ if uploaded_files:
     if st.button("⚡ Generate Merged Excel"):
 
         progress_bar = st.progress(0)
-        status_text = st.empty()
-
         file_dict_list = []
-        total_files = len(uploaded_files)
 
         for i, file in enumerate(uploaded_files):
-            status_text.text(f"Loading {file.name}...")
             file_dict_list.append({
                 "name": file.name,
                 "bytes": file.getvalue()
             })
-            progress_bar.progress((i + 1) / total_files * 0.4)
+            progress_bar.progress((i + 1) / len(uploaded_files) * 0.3)
 
-        status_text.text("Processing highlighted duplicate groups...")
-        output_file, stats = process_files_parallel(file_dict_list)
-        progress_bar.progress(0.85)
+        headers, all_0, all_1, all_2, summary, errors = process_files(file_dict_list)
 
-        status_text.text("Finalizing output...")
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        # ✅ COLOR DEFINITIONS
+        red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+        yellow_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+        def write_sheet(name, groups, severity_fill):
+            ws = wb.create_sheet(name)
+
+            if headers:
+                for i, h in enumerate(headers, start=1):
+                    ws.cell(1, i, h)
+
+            row_cursor = 2
+
+            for group in groups:
+
+                for filename, row in group:
+
+                    ws.cell(row_cursor, 1, filename)
+
+                    for j, cell in enumerate(row, start=2):
+                        new_cell = ws.cell(row_cursor, j, cell.value)
+
+                        # ✅ ORIGINAL HIGHLIGHT PRESERVED
+                        original_fill = safe_copy_fill(cell)
+                        if original_fill:
+                            new_cell.fill = original_fill
+
+                        # ✅ OVERLAY WITH SEVERITY COLOR
+                        if severity_fill:
+                            new_cell.fill = severity_fill
+
+                    row_cursor += 1
+
+                row_cursor += 1
+
+        write_sheet("2+ SoldTo Accounts", all_2, red_fill)
+        write_sheet("1 SoldTo Accounts", all_1, yellow_fill)
+        write_sheet("0 SoldTo Accounts", all_0, None)
+
+        # ✅ SUMMARY
+        ws_summary = wb.create_sheet("Summary")
+        ws_summary.append(["File", "Total Groups", "0", "1", "2+"])
+
+        for s in summary:
+            ws_summary.append([
+                s["file"], s["total"], s["0"], s["1"], s["2"]
+            ])
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
         progress_bar.progress(1.0)
+
+        if errors:
+            st.warning("⚠️ Some files skipped:")
+            for e in errors:
+                st.write(f"❌ {e}")
 
         st.success("✅ Excel generated successfully!")
 
-        st.metric("Files Processed", stats["total_files"])
-        st.caption(f"⏱ Processing Time: {stats['time']} seconds")
-
-        if stats["errors"]:
-            st.warning("⚠️ Some files were skipped due to missing columns:")
-
-            for err in stats["errors"]:
-                st.write(f"❌ {err['file']}")
-                st.write(f"Columns found: {err['columns']}")
-
         st.download_button(
-            label="⬇️ Download Merged Excel",
-            data=output_file,
-            file_name="Multiple Sold To Duplicates.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "⬇️ Download Merged Excel",
+            data=output,
+            file_name="Multiple Sold To Duplicates.xlsx"
         )
