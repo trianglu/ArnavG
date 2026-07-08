@@ -187,7 +187,7 @@ if st.button("Process Files"):
         # Convert all values to strings where needed
         final_df = final_df.fillna("")
             
-            if remove_duplicates:
+        if remove_duplicates:
 
                 if "ID" in final_df.columns:
 
