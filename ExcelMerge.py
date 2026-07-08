@@ -189,7 +189,7 @@ if st.button("Process Files"):
             
         if remove_duplicates:
 
-                if "ID" in final_df.columns:
+            if "ID" in final_df.columns:
 
                     before_count = len(final_df)
 
