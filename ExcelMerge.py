@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from openpyxl import load_workbook
 
-# ============================================================
+# ==================================================
 # PAGE CONFIG
-# ============================================================
+# ==================================================
 
 st.set_page_config(
     page_title="Atlas Copco Excel Merger",
@@ -22,39 +23,50 @@ The app will:
 
 ✅ Remove report metadata
 
-✅ Merge all files
+✅ Merge files
 
-✅ Remove duplicate IDs (optional)
+✅ Remove duplicate IDs
 
-✅ Generate a downloadable Excel file
+✅ Download a clean merged workbook
 """)
 
-# ============================================================
+# ==================================================
 # FUNCTIONS
-# ============================================================
+# ==================================================
 
 def load_excel(uploaded_file):
     """
-    Load workbook safely from uploaded file.
+    Uses openpyxl directly instead of pandas.read_excel.
+    This is more tolerant of problematic Atlas Copco exports.
     """
+
     uploaded_file.seek(0)
 
     file_bytes = BytesIO(uploaded_file.read())
 
-    workbook = pd.read_excel(
-        file_bytes,
-        sheet_name=None,
-        header=None,
-        engine="openpyxl"
+    workbook = load_workbook(
+        filename=file_bytes,
+        data_only=True,
+        read_only=True
     )
 
-    return workbook
+    sheets = {}
+
+    for ws in workbook.worksheets:
+
+        rows = []
+
+        for row in ws.iter_rows(values_only=True):
+            rows.append(list(row))
+
+        sheets[ws.title] = pd.DataFrame(rows)
+
+    return sheets
 
 
 def clean_sheet(df):
     """
-    Find header row containing 'ID'
-    and convert sheet into clean table.
+    Locate header row containing ID
     """
 
     header_row = None
@@ -86,9 +98,9 @@ def clean_sheet(df):
     return cleaned_df
 
 
-# ============================================================
-# USER OPTIONS
-# ============================================================
+# ==================================================
+# USER SETTINGS
+# ==================================================
 
 uploaded_files = st.file_uploader(
     "Upload Excel Files",
@@ -106,24 +118,24 @@ show_preview = st.checkbox(
     value=True
 )
 
-# ============================================================
-# PROCESS FILES
-# ============================================================
+# ==================================================
+# PROCESS
+# ==================================================
 
 if st.button("Process Files"):
 
     if not uploaded_files:
-        st.warning("Please upload at least one file.")
+
+        st.warning("Please upload one or more Excel files.")
 
     else:
 
         merged_frames = []
-
         failed_files = []
 
-        progress = st.progress(0)
+        progress_bar = st.progress(0)
 
-        for idx, uploaded_file in enumerate(uploaded_files):
+        for index, uploaded_file in enumerate(uploaded_files):
 
             try:
 
@@ -138,58 +150,79 @@ if st.button("Process Files"):
                         if cleaned_df is None:
                             continue
 
-                        cleaned_df["Source File"] = uploaded_file.name
+                        cleaned_df["Source File"] = (
+                            uploaded_file.name
+                        )
 
                         merged_frames.append(cleaned_df)
 
-                    except Exception:
-                        pass
+                    except Exception as sheet_error:
 
-            except Exception as e:
+                        failed_files.append(
+                            f"{uploaded_file.name} | "
+                            f"{sheet_name} | "
+                            f"{sheet_error}"
+                        )
+
+            except Exception as file_error:
 
                 failed_files.append(
-                    f"{uploaded_file.name} ({str(e)})"
+                    f"{uploaded_file.name} | "
+                    f"{file_error}"
                 )
 
-            progress.progress(
-                (idx + 1) / len(uploaded_files)
+            progress_bar.progress(
+                (index + 1) / len(uploaded_files)
             )
+
+        # ==========================================
+        # NO DATA
+        # ==========================================
 
         if not merged_frames:
 
-            st.error("No valid data found.")
+            st.error(
+                "No valid sheets could be processed."
+            )
 
         else:
 
-            # ====================================================
+            # ==========================================
             # MERGE
-            # ====================================================
+            # ==========================================
 
             final_df = pd.concat(
                 merged_frames,
                 ignore_index=True
             )
 
-            # ====================================================
+            # ==========================================
             # CLEAN COLUMN NAMES
-            # ====================================================
+            # ==========================================
 
             clean_columns = []
 
             for i, col in enumerate(final_df.columns):
 
                 if pd.isna(col):
-                    clean_columns.append(f"Column_{i}")
+
+                    clean_columns.append(
+                        f"Column_{i}"
+                    )
+
                 else:
-                    clean_columns.append(str(col))
+
+                    clean_columns.append(
+                        str(col)
+                    )
 
             final_df.columns = clean_columns
 
             final_df = final_df.fillna("")
 
-            # ====================================================
+            # ==========================================
             # REMOVE DUPLICATES
-            # ====================================================
+            # ==========================================
 
             if remove_duplicates:
 
@@ -201,18 +234,21 @@ if st.button("Process Files"):
                         subset=["ID"]
                     )
 
-                    removed = before_count - len(final_df)
-
-                    st.success(
-                        f"Removed {removed:,} duplicate rows."
+                    removed = (
+                        before_count
+                        - len(final_df)
                     )
 
-            # ====================================================
+                    st.success(
+                        f"Removed {removed:,} duplicates."
+                    )
+
+            # ==========================================
             # SUMMARY
-            # ====================================================
+            # ==========================================
 
             st.success(
-                f"Successfully merged {len(uploaded_files)} files."
+                f"Merged {len(uploaded_files)} files."
             )
 
             st.success(
@@ -222,17 +258,19 @@ if st.button("Process Files"):
             if failed_files:
 
                 st.warning(
-                    f"{len(failed_files)} file(s) could not be read."
+                    f"{len(failed_files)} file(s) or sheet(s) failed."
                 )
 
-                with st.expander("View Failed Files"):
+                with st.expander(
+                    "View Failed Files"
+                ):
 
-                    for file in failed_files:
-                        st.write(file)
+                    for item in failed_files:
+                        st.write(item)
 
-            # ====================================================
+            # ==========================================
             # PREVIEW
-            # ====================================================
+            # ==========================================
 
             if show_preview:
 
@@ -247,7 +285,7 @@ if st.button("Process Files"):
 
                 st.write(
                     f"Showing first {len(preview_df)} rows "
-                    f"of {len(final_df):,} total rows."
+                    f"of {len(final_df):,}"
                 )
 
                 st.dataframe(
@@ -255,9 +293,9 @@ if st.button("Process Files"):
                     use_container_width=True
                 )
 
-            # ====================================================
-            # CREATE EXCEL FILE
-            # ====================================================
+            # ==========================================
+            # CREATE OUTPUT FILE
+            # ==========================================
 
             output = BytesIO()
 
@@ -274,16 +312,22 @@ if st.button("Process Files"):
 
             output.seek(0)
 
-            # ====================================================
-            # DOWNLOAD BUTTON
-            # ====================================================
-
             st.download_button(
                 label="📥 Download Merged Excel File",
                 data=output.getvalue(),
                 file_name="Merged_Registered_Products.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+# ==================================================
+# FOOTER
+# ==================================================
+
+st.divider()
+
+st.caption(
+    "Atlas Copco Excel Merger"
+)
 
 st.markdown('### GitHub Requirements')
 st.code('''
