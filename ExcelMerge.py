@@ -168,10 +168,25 @@ if st.button("Process Files"):
         else:
 
             final_df = pd.concat(
-                merged_frames,
-                ignore_index=True
-            )
-
+            merged_frames,
+            ignore_index=True
+        )
+        
+        # Fix column names
+        clean_columns = []
+        
+        for i, col in enumerate(final_df.columns):
+        
+            if pd.isna(col):
+                clean_columns.append(f"Column_{i}")
+            else:
+                clean_columns.append(str(col))
+        
+        final_df.columns = clean_columns
+        
+        # Convert all values to strings where needed
+        final_df = final_df.fillna("")
+            
             if remove_duplicates:
 
                 if "ID" in final_df.columns:
@@ -200,11 +215,19 @@ if st.button("Process Files"):
             )
 
             if show_preview:
-
                 st.subheader("Preview")
-
+            
+                preview_df = final_df.head(100).copy()
+            
+                preview_df.columns = [
+                    str(col)
+                    for col in preview_df.columns
+                ]
+            
+                preview_df = preview_df.fillna("")
+            
                 st.dataframe(
-                    final_df.head(100),
+                    preview_df,
                     use_container_width=True
                 )
 
